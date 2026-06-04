@@ -96,8 +96,12 @@ ivm use --version 0.1.2       # stop -> swap binaries -> start (one shot)
 - **[`ivm` commands](cli/ivm-reference.md)** — node lifecycle: `install` · `switch` · `service` · `use` · `list` · `rm`
 - **[`isann` commands](cli/cli-reference.md)** — node client: `account` · `auth` · `docker` · `infer` · `model` · `profile` · discovery
 
+## Roadmap
+
+- **[Full roadmap](roadmap/roadmap.md)** — quarterly milestones through 2027: launch → Web3 payment rails → marketplace → platform reach.
+
 ---
 
 *Source repository is private; this release repo hosts the binaries + this guide. Full documentation (inference, node operation) is in progress.*
 
-> **Roadmap** — node sharing and metered payment between nodes (decentralized AI on `ERC-8004` identity / `ERC-8183` escrow / `x402` payment, no proprietary token) are planned for a later release.
+> **Roadmap** — node sharing and metered payment between nodes (decentralized AI on `ERC-8004` identity / `ERC-8183` escrow / `x402` payment, no proprietary token) land in **Phase 2 (Dec 2026 – Feb 2027)**. See the **[full roadmap](roadmap/roadmap.md)**.
