@@ -122,8 +122,8 @@ Register/control isannd as a service/daemon. It targets the stable path `<root>/
 
 | sub | action |
 |---|---|
-| `install` | Register the task/unit (no auto-start — on-demand). Start it separately with `start`. |
-| `uninstall` | Unregister. |
+| `install` | Register the task/unit (no auto-start — on-demand). **Windows** also adds a program-scoped inbound firewall rule for `isannd.exe` (required for cross-node hole-punch under the non-interactive S4U task). Start it separately with `start`. |
+| `uninstall` | Unregister (+ remove the firewall rule on Windows). |
 | `status` | Show state (Ready / Running / not installed) — no privilege. |
 | `start` | Start. |
 | `stop` | Stop. |
@@ -131,11 +131,14 @@ Register/control isannd as a service/daemon. It targets the stable path `<root>/
 ```console
 $ .\ivm service install      # UAC -> S4U Scheduled Task (no stored password)
 Task "isannd" installed -- S4U, runs as MACHINE\user, survives logoff.
+  firewall: inbound allowed for isannd (cross-node hole-punch)
 $ .\ivm service start
 $ .\ivm service status       # no privilege needed
 Task "isannd": Running  (lastRun: ..., lastResult: 267009)
 ```
 > `lastResult: 267009` (= `0x41301 SCHED_S_TASK_RUNNING`, "task currently running") is normal, not an error.
+>
+> **Windows firewall (cross-node)**: a non-interactive S4U task never gets the interactive Firewall "allow?" prompt a console run would, so without an inbound rule the peer's hole-punch / dial replies are dropped and `--nodes` dials time out. `install` adds a program-scoped inbound rule for `isannd.exe`; `uninstall` removes it — operators don't touch the firewall.
 
 ### `ivm use`
 `switch` wrapped in service control. If a service is registered: **service stop → switch → service start** (ends running on the new version). If not registered: same as raw `switch` + a hint (no privilege). **Does not register.**

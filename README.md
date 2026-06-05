@@ -91,6 +91,19 @@ ivm use --version 0.1.2       # stop -> swap binaries -> start (one shot)
 
 ---
 
+## Operating your node
+
+With the node up (`isann docker status` → **docker running**), set up an engine and serve a model. Follow these in order:
+
+1. **[Install an engine](guide/1-engine.md)** — create a containerized inference backend (`llama` / `sd` / `vllm`).
+2. **[Install a model](guide/2-model.md)** — download a model into the engine.
+3. **[Configure the engine](guide/3-config.md)** — point the engine `.env` at your model + tune it.
+4. **[Profiles](guide/4-profile.md)** *(optional)* — save and switch named `.env` configs.
+5. **[Start the engine](guide/5-start.md)** — apply the config and verify it's serving.
+6. **[Run inference](guide/6-inference.md)** — locally, or on another node with `--nodes`.
+
+---
+
 ## CLI reference
 
 - **[`ivm` commands](cli/ivm-reference.md)** — node lifecycle: `install` · `switch` · `service` · `use` · `list` · `rm`

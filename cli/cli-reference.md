@@ -139,7 +139,7 @@ Inference jobs. **Different namespace** — not an `/internal/api/...` admin pat
 
 | Command | Description | API | Nodes |
 |---|---|---|---|
-| `isann infer run --engine e [--<param>..] [-wait] [-stdin] [--out f] [--preset n] [--nodes id] [--provider h:p]` | Submit a job (job_id; `-wait` polls + renders). | `POST {base}/svc/<svc>/v1/jobs` | ✅ |
+| `isann infer run --engine e [--<param>..] [-stdin] [--out f] [--preset n] [--nodes id] [--rv alias\|url] [--provider h:p]` | Submit a job → `job_id` (async; fetch with `result`). | `POST {base}/svc/<svc>/v1/jobs` | ✅ |
 | `isann infer chat --engine e [--system s] [--temperature f] [--max-tokens n]` | Multi-turn REPL (`/reset`, `/exit`). | `POST {base}/svc/<svc>/v1/jobs` per turn | ✅ |
 | `isann infer status <id>` | Job status. | `GET {base}/v1/jobs/<id>` | ✅ |
 | `isann infer result <id> [--out f] [-consume]` | Finished result (text→stdout, image/audio→file). | `GET {base}/v1/jobs/<id>/result` | ✅ |
@@ -147,8 +147,9 @@ Inference jobs. **Different namespace** — not an `/internal/api/...` admin pat
 | `isann infer queue --engine e` | Service queue stats. | `GET {base}/v1/queue/stats?service=<svc>` | ✅ |
 
 ```console
-$ isann infer run --engine text --prompt "Summarize in one line: ..." -wait
+$ isann infer run --engine text --prompt "Summarize in one line: ..."
 job_id: j-7f3a    service: llm-api    queue: 0/8
+$ isann infer result j-7f3a
 The summarized text appears here.
 
 $ isann infer result j-9b1 --out out.png
@@ -156,6 +157,8 @@ saved out.png (2451233 bytes)
 ```
 
 For `result`, `--proj` extracts a field — e.g. `--proj choices[0].message.content`. `infer` shapes output client-side.
+
+**Cross-node (`--nodes`)**: isannd self-dials the RV and dials the peer directly — **no broker needed on the client**. The RV is the `rv use` default, overridable per-command with `--rv <alias|url>` (an alias also carries that RV's stored control-addr override; a bare URL derives `host:9100`). `run`/`chat`/`status`/`result`/`rm`/`queue` all accept `--rv`. Pass `--nodes` (and `--rv`) to **every** sub-command for a job — the job lives on the remote node, so `status`/`result` without `--nodes` query the local provider and 502.
 
 ## list
 
@@ -239,17 +242,21 @@ Rendezvous bookmarks (isannd owns `rvs.json`). All leaves support `--nodes`; ses
 
 | Command | Description | API | Nodes |
 |---|---|---|---|
-| `isann rv add --alias n --url <https://host:port> [--force]` | Register `alias → URL`. | `POST /rv/add` | ✅ |
-| `isann rv list` | Registered RVs (`*` = default). | `GET /rv/list` | ✅ |
+| `isann rv add --alias n --url <https://host:port> [--control h:p] [--force]` | Register `alias → URL`. Control addr is derived `host:9100`; `--control` overrides for a non-standard RV. | `POST /rv/add` | ✅ |
+| `isann rv list` | Registered RVs — `URL`, `CONTROL` (derived/overridden), `*` = default. | `GET /rv/list` | ✅ |
 | `isann rv rm --alias n` | Remove by alias. | `DELETE /rv/<alias>` | ✅ |
 | `isann rv use --alias n \| --clear` | Set the default RV (or clear). | `POST /rv/use` | ✅ |
 
 ```console
 $ isann rv add --alias office --url https://rv.example:9000
-[isann] alias "office" -> https://rv.example:9000
+[isann] alias "office" -> https://rv.example:9000  (control rv.example:9100)
+$ isann rv add --alias custom --url https://rv2.example:9000 --control rv2.example:19100
+[isann] alias "custom" -> https://rv2.example:9000  (control rv2.example:19100)
 $ isann rv use --alias office
 [isann] default RV -> "office"
 ```
+
+The **control addr** is the RV TCP endpoint isannd self-dials for cross-node lookups. By default it's the URL host + port `9100`; `--control <host:port>` overrides it for an RV on a non-standard control port. `isann rv list` shows the effective value in the `CONTROL` column.
 
 ---
 
