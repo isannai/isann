@@ -101,13 +101,20 @@ With the node up (`isann docker status` → **docker running**), set up an engin
 4. **[Profiles](guide/4-profile.md)** *(optional)* — save and switch named `.env` configs.
 5. **[Start the engine](guide/5-start.md)** — apply the config and verify it's serving.
 6. **[Run inference](guide/6-inference.md)** — locally, or on another node with `--nodes`.
+7. **[Drive from Claude (MCP)](guide/7-mcp.md)** *(optional)* — connect Claude Code and run the node's tools (inference, engine start/stop, model/discovery) in natural language.
+
+> **Serving your own GPU?** The node answers inference through a **provider** (host-native, not a container). Start it with **`isann mesh on provider --now`** — it then autostarts with `isannd`. A client-only node skips this: `isann infer --nodes` reaches other nodes' providers directly. See **[`isann` reference → mesh](cli/cli-reference.md)**.
+
+> **Drive it from Claude?** The node embeds an **MCP server** — issue a token (`isann mcp token`) and register the endpoint with Claude Code (`claude mcp add --transport http …`) to run the node's tools (engine start/stop, model list, inference) in natural language. See **[7 · Drive your node from Claude](guide/7-mcp.md)**.
+
+**Reference — [Port policy](guide/ports.md):** inside a container every service listens on `8080`; on the host, **broker `8080`** and **provider `8090`**. Engine static IPs, debug ports, and the reasoning are in the guide.
 
 ---
 
 ## CLI reference
 
 - **[`ivm` commands](cli/ivm-reference.md)** — node lifecycle: `install` · `switch` · `service` · `use` · `list` · `rm`
-- **[`isann` commands](cli/cli-reference.md)** — node client: `account` · `auth` · `docker` · `infer` · `model` · `profile` · discovery
+- **[`isann` commands](cli/cli-reference.md)** — node client: `account` · `auth` · `docker` · `infer` · `mcp` · `mesh` · `model` · `profile` · discovery
 
 ## Roadmap
 

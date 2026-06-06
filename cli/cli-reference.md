@@ -20,6 +20,17 @@
 
 > Node bootstrap is split out — layout/cert = **`ivm init`**, first owner registration = **`isann auth transfer --owner`**. `isann init` has been **removed**.
 
+## Common flags
+
+Shared across commands — listed once here instead of repeating per command. Each namespace's table below still carries a per-command **Nodes** column for detail.
+
+| Flag(s) | Applies to |
+|:--|:--|
+| **`-json`** · **`-pretty`** · **`--proj <p>`** — output shaping (raw / indent / field projection) | **all read commands** (every namespace) |
+| **`--nodes <id>`** — run on a peer node (cross-node) | **✅** `info` · `infer` · `mesh` · `profile` · `rv` (all sub-commands) · `auth` (transfer/add/rm/list) · `docker` (status/warmup/shutdown/ps/start/stop/restart) · `list` (models/loras/vaes/profiles) · `model` (pull/rm/list)  —  **✗** `account` · `favorite` · `ghcr` · `mcp` · `preset` |
+
+> Cross-node wires through `POST /internal/api/nodes/forward` (adminPath in body). **Query-string** options are not forwarded (`auth --roles`, `docker --force`, `profile rm --force`); body options are.
+
 ---
 
 ## info / version
@@ -182,6 +193,76 @@ ENGINE  KIND   TYPE    REG  NAME                 SIZE
 llama   model  single   v   Qwen2.5-1.5B-Q4_K_M  1.0 GiB
 ```
 
+## mcp
+
+Expose this node to an **MCP client** (Claude Code, etc.) so it can drive the node's tools in natural language. isannd embeds an MCP server (Streamable HTTP, JSON-RPC 2.0) at **`POST /internal/api/mcp`**; `isann mcp` manages the Bearer tokens a client uses to reach it. `--nodes` not supported (token management is per-node local).
+
+> The token is the **client→isannd** credential — a random opaque secret (stored as a **hash** in `artifacts/mcp.json`, raw shown once), **not** a signature or wallet key. Signing stays an isannd-side keycache concern.
+
+| Command | Description | API | Nodes |
+|---|---|---|---|
+| `isann mcp tools` | List the tools the MCP server exposes. | `GET /mcp/tools` | — |
+| `isann mcp token [--label t]` | Issue a token (printed **once** — copy it now). | `POST /mcp/tokens` | — |
+| `isann mcp token list` | List issued tokens (id + label + created). | `GET /mcp/tokens` | — |
+| `isann mcp token revoke <id>` | Revoke a token by id. | `DELETE /mcp/tokens/{id}` | — |
+| `isann mcp token rotate <id>` | Issue a new token and revoke `<id>`. | (issue + delete) | — |
+
+```console
+$ isann auth unlock              # issuing a token is an operator action
+$ isann mcp token
+b1c2d3e4f5...9e0f
+[isann] issued MCP token a1b2c3d4e5f6 — shown ONCE, copy it now.
+
+$ claude mcp add --transport http isann \
+    http://127.0.0.1:8443/internal/api/mcp \
+    --header "Authorization: Bearer b1c2d3e4f5...9e0f"
+```
+
+**Tools exposed** — consolidated one-per-namespace (keeps the model's tool context small; operations are an `action`/`what` enum, not separate tools):
+
+| Tool | Kind | Args |
+|---|---|---|
+| `node_info` | read | — |
+| `list` | read | `what`: nodes \| models \| profiles \| containers \| mesh \| rvs |
+| `infer` | read | `action`: schema \| run \| status \| result · `engine` · `input{}` · `job_id` |
+| `docker` | control | `action`: start \| stop \| restart \| rm · `name` · `force?` |
+| `mesh` | control | `action`: start \| stop \| on \| off · `component`: provider \| broker · `now?` |
+| `profile` | control | `action`: get \| use · `engine` · `name` |
+| `rv` | control | `action`: add \| rm \| use · `alias` · `url?` |
+| `model` | mixed | `action`: info \| search \| rm · (`url`/`query`/`engine`+`kind`+`name`) |
+
+`isann mcp tools` prints this list. **Control actions** require an **unlocked operator** — when the node is locked they return a *"locked — run `isann auth unlock`"* result so the assistant can prompt you (read actions like `infer`, `list`, `model search` are not gated). Gating is **per action**, so a tool's reads work while locked even if its writes don't. Tools act on **this node** (cross-node targeting is a later addition). e.g. *"stop llama"* → `docker(action=stop, name=llama)`; *"generate an image"* → `infer(action=run, engine=sd, input={…})`.
+
+> Claude Code connects over HTTP directly. stdio-only clients bridge via `mcp-remote`. Endpoint is loopback-only (`127.0.0.1`) with an Origin guard.
+
+## mesh
+
+Host-native backends — `provider` and `broker`. They're the lightweight `proxy` binary (**not** containers: they couple to isannd over loopback, so they live on the host), and **isannd spawns them as managed child processes** (procguard — they die with isannd, and `ivm use` restarts them on the new binary). **opt-in**: a node with none enabled runs isannd alone — a client-only node still does cross-node inference via self-dial. Operator-only; session required. `--nodes` targets a **peer's** backends (your operator role on that node is enforced).
+
+> **on/off = autostart** (persisted in `artifacts/mesh.json`, like `systemctl enable/disable`) · **start/stop = right now** (runtime, like `systemctl start/stop`). Independent.
+
+| Command | Description | API | Nodes |
+|---|---|---|---|
+| `isann mesh status` | provider/broker autostart + runtime state (PID, listen addr). | `GET /mesh/status` | ✅ |
+| `isann mesh start <provider\|broker>` | Spawn now (runtime only — not persisted). | `POST /mesh/start` | ✅ |
+| `isann mesh stop <provider\|broker>` | Kill the running process now. | `POST /mesh/stop` | ✅ |
+| `isann mesh on <provider\|broker> [--now]` | Enable autostart (saved to `artifacts/mesh.json`). `--now` also starts it immediately. | `POST /mesh/on` | ✅ |
+| `isann mesh off <provider\|broker> [--now]` | Disable autostart. `--now` also stops it now. | `POST /mesh/off` | ✅ |
+
+```console
+$ isann mesh on provider --now
+[isann] provider: autostart on, started (pid 12345)
+
+$ isann mesh status
+COMPONENT  AUTOSTART  STATE     PID     LISTEN
+provider   on         running   12345   :8090
+broker     off        stopped   -       :8080
+```
+
+**provider** serves local inference (needed for a node that serves its own GPU); **broker** is the optional management UI. Many nodes need neither — `isann infer --nodes` reaches other nodes' providers directly.
+
+**Cross-node (`--nodes`)**: manage a **peer's** backends — `isann mesh on provider --nodes P:0x…` enables + starts the provider on a remote node you operate (gated by your operator role there). `isann mesh status --nodes a,b,c` fans in a NODE-column table. Same mechanism as `docker start --nodes` (remote process control).
+
 ## model
 
 Model management. pull/rm/list support `--nodes`; info/search/register do not.
@@ -258,12 +339,4 @@ $ isann rv use --alias office
 
 The **control addr** is the RV TCP endpoint isannd self-dials for cross-node lookups. By default it's the URL host + port `9100`; `--control <host:port>` overrides it for an RV on a non-standard control port. `isann rv list` shows the effective value in the `CONTROL` column.
 
----
-
-## Appendix — cross-node (`--nodes`) support
-
-| Supported ✅ | Not supported — |
-|---|---|
-| auth (transfer/add/rm/list) · docker (status/warmup/shutdown/ps/start/stop/restart) · list (models/loras/vaes/profiles) · model (pull/rm/list) · profile (all) · rv (all) · infer (all) · info | account (all) · favorite (all) · ghcr (all) · docker (create/rm/inspect/probe/pull) · preset (all, local) · model (info/search/register) · version |
-
-> Every cross-node call wires through `POST /internal/api/nodes/forward` and carries the adminPath to the peer. Query-string options (`auth --roles`, `docker --force`, `profile rm --force`) are not forwarded.
+> Cross-node support is summarized in **[Common flags](#common-flags)** at the top.

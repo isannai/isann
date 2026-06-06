@@ -16,7 +16,6 @@
 - RAG — embedding models + vector DB support
 - Voice AI engine support
 - Broker Light
-- MCP server — `isannd` speaks the **Model Context Protocol**, so AI agents & IDEs (Claude Desktop / Code) discover your node and drive its inference · models · discovery as native tools
 - Discord Bot · Telegram Bot AI integration
 - Public announcement
 
