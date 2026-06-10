@@ -33,12 +33,13 @@ claude mcp add --transport http isann \
 
 ## Tools
 
-The server exposes **8 tools**, one per `isann` namespace (the action is an `enum` argument — a small, fixed tool count the model can load in full). List the live set, with each tool's kind, via `isann mcp tools`:
+The server exposes **9 tools**, one per `isann` namespace (the action is an `enum` argument — a small, fixed tool count the model can load in full). List the live set, with each tool's kind, via `isann mcp tools`:
 
 | Tool | Ask, e.g. |
 |:--|:--|
 | `node_info` | "What are this node's specs and version?" |
 | `list` | "List the registered nodes / installed models." |
+| `conn` | "Ping lab — is it reachable, and how fast?" |
 | `infer` | "Run this prompt on llama." |
 | `docker` | "Restart the sd container / show its status." |
 | `model` | "Search for / remove a model." |
@@ -51,7 +52,7 @@ The server exposes **8 tools**, one per `isann` namespace (the action is an `enu
 Authentication is **two hops with different credentials**: Claude carries only the Bearer **token** (it has no key, so it cannot sign); `isannd` adds the ECDSA **signature** with your unlocked key.
 
 - **Read** actions (inference, listing, model search, node info) work with the token alone.
-- **Control** actions (docker, mesh, `profile use`, `model rm`, …) run **only while your operator key is warm** — that is, after you've run `isann auth unlock` in a terminal. If the key is cold, the tool returns `🔒 locked — run isann auth unlock` and Claude relays that to you. Unlock once and control tools work until the session expires.
+- **Control** actions (docker, mesh, `profile use`, `model rm`, …) — and `conn ping`, which signs a cross-node request — run **only while your operator key is warm**, that is, after you've run `isann auth unlock` in a terminal. If the key is cold, the tool returns `🔒 locked — run isann auth unlock` and Claude relays that to you. Unlock once and control tools work until the session expires.
 - Your **passphrase never crosses the MCP / cloud channel** — you type it only in your own terminal.
 
 This reuses the node's normal control/data gate (see the [overview](../README.md)), so connecting Claude does **not** widen what the node allows: external inference stays sandboxed, and operation still requires an operator signature.

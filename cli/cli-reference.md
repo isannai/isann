@@ -54,13 +54,14 @@ isannd     0.1.2 (running at https://127.0.0.1:8443)
 
 ## account
 
-Pure local — calls `pkg/wallet` directly, never touches isannd. `--nodes` not supported.
+Pure local — calls `pkg/wallet` directly, never touches isannd (except `whoami`, which reads the daemon's unlock session). `--nodes` not supported.
 
 | Command | Description | API |
 |---|---|---|
 | `isann account create --alias n [--force]` | New keystore + register alias → address. Passphrase ≥ 8 chars. | `local` |
 | `isann account import <path> --alias n` · `--pk <hex> --alias n` | Hardlink an existing keystore, or encrypt a raw 0x-hex private key. | `local` |
 | `isann account list [-json]` | Alias / address / file / owner-role table. | `local` |
+| `isann account whoami [-json]` | Print the alias **currently unlocked** in the isannd session (reverse-mapped from accounts.json) + its **session expiry and remaining TTL**; `not unlocked` otherwise. | `GET /auth/status` + local |
 | `isann account pk --alias a` | Decrypt + print the raw private key (passphrase prompt + warning). | `local` |
 | `isann account rm --alias a [-y]` | Remove a keystore (owner key protected — transfer first). | `local` |
 
@@ -68,6 +69,11 @@ Pure local — calls `pkg/wallet` directly, never touches isannd. `--nodes` not 
 $ isann account create --alias office
 [isann] generated 0xab12...cd34
 [isann] alias "office" -> 0xab12...cd34
+
+$ isann account whoami
+office
+  expires  2026-06-10T15:42:18+09:00
+  ttl      38m12s
 ```
 
 ## auth
@@ -94,6 +100,24 @@ $ isann auth transfer --owner me      # owner unset -> first registration
 ```
 
 Passphrase priority for `unlock`: `--passphrase-stdin` > `ISANN_PASSPHRASE` > `--passphrase` > prompt.
+
+## conn
+
+Connectivity diagnostics between nodes. Session required (the probe is a signed cross-node round-trip).
+
+| Command | Description | API | Nodes |
+|---|---|---|---|
+| `isann conn ping --nodes <list> [--count N]` | Dial each node through the real cross-node path (RV lookup + hole-punch + HTTP/3) and report reachability + round-trip latency + the address it connected through. | `GET /conn/ping?node=<n>` | ✅ (fan-out) |
+
+```console
+$ isann conn ping --nodes office,lab,0xBADa…7CEe
+NODE      RESULT   RTT       VIA
+office    ok        42.1 ms  203.0.113.7:7443 (wan)
+lab       ok         7.8 ms  192.168.0.5:7443 (lan)
+0xBADa…   timeout      —     —
+```
+
+`--nodes` takes one target or a comma list; favorites (aliases) resolve like every other cross-node command. `--count N` (1-10) pings each node N times and reports the **best** RTT. **VIA** is the address that answered — `lan` (private IP) vs `wan` (public; direct or hole-punched, not yet distinguished). Reachability = *the peer answered* — even a `403` (you're not its operator) proves the connection punched through, so it counts as `ok`. Per-node isolation: one node failing never drops the others.
 
 ## docker
 
@@ -177,16 +201,19 @@ Read-only views. models/loras/vaes/profiles support `--nodes`. nodes/metrics que
 
 | Command | Description | API | Nodes |
 |---|---|---|---|
-| `isann list nodes [--rv r]` | Nodes registered on an RV. | `GET /list/nodes?rv=<url>` | — |
-| `isann list metrics [--rv r]` | Per-(node,service) metrics from the RV. | `GET /list/metrics?rv=<url>` | — |
+| `isann list nodes [--rv r] [--role x] [--owners a,b] [--model m] [--limit N] [--page N] [-no-cache]` | Nodes on an RV. The full list is fetched once and **ETag-cached** (revalidated every call — never stale, 304 when unchanged); `--role` / `--owners` / `--model` filter and `--page`/`--limit` paginate **client-side** (paging never re-fetches). | `GET /list/nodes?rv=<url>` | — |
+| `isann list metrics [--rv r]` | Per-(node,service) metrics from the RV (always fresh — volatile, no cache). | `GET /list/metrics?rv=<url>` | — |
 | `isann list models\|loras\|vaes [--engine e]` | Scan `engines/<e>/models/` (loras/vaes are KIND-filtered views). | `GET /list/models [?engine=<e>]` | ✅ |
 | `isann list profiles [--engine e]` | Scan `engines/<e>/profiles/*.env`. | `GET /list/profiles [?engine=<e>]` | ✅ |
 | `isann list favorites \| rvs \| accounts \| presets` | Delegate to favorite / rv / account / preset. | (delegated) | partial |
 
+`list nodes` filter matching: **`--role`** exact — `provider` \| `broker` only (consumers register for hole-punch and are **discovery-hidden**, so they never appear here; their counts live in `list rvs -remote`); **`--owners`** lowercase **prefix** (comma list, OR) — not exact; **`--model`** case-insensitive **substring** of a served model name — not exact. `-no-cache` forces a fresh fetch.
+
 ```console
-$ isann list nodes --rv office
-ID          ROLE      ADDR          OWNER     TPM
-p:0xabc...  provider  1.2.3.4:7443  0xabc...  verified
+$ isann list nodes --rv office --role provider --model qwen --limit 10
+ID          ROLE      ADDR          OWNER     MODEL        TPM
+p:0xabc...  provider  1.2.3.4:7443  0xabc...  qwen2.5:14b  verified
+[isann] 1 node(s)
 
 $ isann list models --engine llama
 ENGINE  KIND   TYPE    REG  NAME                 SIZE
@@ -224,6 +251,7 @@ $ claude mcp add --transport http isann \
 |---|---|---|
 | `node_info` | read | — |
 | `list` | read | `what`: nodes \| models \| profiles \| containers \| mesh \| rvs |
+| `conn` | control* | `action`: ping · `node` (id\|alias) — *cross-node* reachability + latency; needs unlock (signs) |
 | `infer` | read | `action`: schema \| run \| status \| result · `engine` · `input{}` · `job_id` |
 | `docker` | control | `action`: start \| stop \| restart \| rm · `name` · `force?` |
 | `mesh` | control | `action`: start \| stop \| on \| off · `component`: provider \| broker · `now?` |
@@ -231,7 +259,7 @@ $ claude mcp add --transport http isann \
 | `rv` | control | `action`: add \| rm \| use · `alias` · `url?` |
 | `model` | mixed | `action`: info \| search \| rm · (`url`/`query`/`engine`+`kind`+`name`) |
 
-`isann mcp tools` prints this list. **Control actions** require an **unlocked operator** — when the node is locked they return a *"locked — run `isann auth unlock`"* result so the assistant can prompt you (read actions like `infer`, `list`, `model search` are not gated). Gating is **per action**, so a tool's reads work while locked even if its writes don't. Tools act on **this node** (cross-node targeting is a later addition). e.g. *"stop llama"* → `docker(action=stop, name=llama)`; *"generate an image"* → `infer(action=run, engine=sd, input={…})`.
+`isann mcp tools` prints this list. **Control actions** require an **unlocked operator** — when the node is locked they return a *"locked — run `isann auth unlock`"* result so the assistant can prompt you (read actions like `infer`, `list`, `model search` are not gated). Gating is **per action**, so a tool's reads work while locked even if its writes don't. Tools act on **this node** — except `conn`, which probes another node via a signed cross-node round-trip; `--nodes`-style cross-node targeting for the other tools is a later addition. e.g. *"stop llama"* → `docker(action=stop, name=llama)`; *"generate an image"* → `infer(action=run, engine=sd, input={…})`.
 
 > Claude Code connects over HTTP directly. stdio-only clients bridge via `mcp-remote`. Endpoint is loopback-only (`127.0.0.1`) with an Origin guard.
 
@@ -324,7 +352,7 @@ Rendezvous bookmarks (isannd owns `rvs.json`). All leaves support `--nodes`; ses
 | Command | Description | API | Nodes |
 |---|---|---|---|
 | `isann rv add --alias n --url <https://host:port> [--control h:p] [--force]` | Register `alias → URL`. Control addr is derived `host:9100`; `--control` overrides for a non-standard RV. | `POST /rv/add` | ✅ |
-| `isann rv list` | Registered RVs — `URL`, `CONTROL` (derived/overridden), `*` = default. | `GET /rv/list` | ✅ |
+| `isann rv list [-remote] [-no-cache]` | Local: registered RVs — `URL`, `CONTROL` (derived/overridden), `*` = default. **`-remote`**: ALL RVs from Gate with per-RV `NODES / PROVIDERS / BROKERS / CONSUMERS / PUBLIC` counts (ETag-cached). | `GET /rv/list` · `-remote`: `GET /internal/gate/v1/rendezvous` | ✅ |
 | `isann rv rm --alias n` | Remove by alias. | `DELETE /rv/<alias>` | ✅ |
 | `isann rv use --alias n \| --clear` | Set the default RV (or clear). | `POST /rv/use` | ✅ |
 
@@ -338,5 +366,7 @@ $ isann rv use --alias office
 ```
 
 The **control addr** is the RV TCP endpoint isannd self-dials for cross-node lookups. By default it's the URL host + port `9100`; `--control <host:port>` overrides it for an RV on a non-standard control port. `isann rv list` shows the effective value in the `CONTROL` column.
+
+`-remote` counts are the Gate's live aggregation of each RV's registered nodes. **`CONSUMERS`** counts client-only nodes (role `consumer`) that register only for NAT hole-punch — they are **counted but never listed** in discovery (`list nodes` / the directory), by design.
 
 > Cross-node support is summarized in **[Common flags](#common-flags)** at the top.

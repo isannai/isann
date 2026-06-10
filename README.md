@@ -107,7 +107,13 @@ With the node up (`isann docker status` → **docker running**), set up an engin
 
 > **Drive it from Claude?** The node embeds an **MCP server** — issue a token (`isann mcp token`) and register the endpoint with Claude Code (`claude mcp add --transport http …`) to run the node's tools (engine start/stop, model list, inference) in natural language. See **[7 · Drive your node from Claude](guide/7-mcp.md)**.
 
-**Reference — [Port policy](guide/ports.md):** inside a container every service listens on `8080`; on the host, **broker `8080`** and **provider `8090`**. Engine static IPs, debug ports, and the reasoning are in the guide.
+---
+
+## Help & reference
+
+- **[Port policy](reference/ports.md)** — inside a container every service listens on `8080`; on the host, **broker `8080`** and **provider `8090`**. Engine static IPs, debug ports, and the reasoning are here.
+- **[Q&A — cross-node & firewall](qna/qna.md)** — `--nodes` won't reach another node? Why "it worked yesterday," how to open the Windows Firewall for `isannd` (script), and how to tell a firewall block from a node being down.
+- **[Troubleshooting — keep Windows awake](troubleshooting/windows-sleep.md)** — a sleeping/hibernating PC drops the node off the mesh (keepalive stops, hole-punch mapping expires). Disable sleep + NIC power-down so the node stays reachable.
 
 ---
 
