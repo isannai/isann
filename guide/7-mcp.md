@@ -33,19 +33,20 @@ claude mcp add --transport http isann \
 
 ## Tools
 
-The server exposes **9 tools**, one per `isann` namespace (the action is an `enum` argument — a small, fixed tool count the model can load in full). List the live set, with each tool's kind, via `isann mcp tools`:
+The server exposes **10 tools**, one per `isann` namespace (the action is an `enum` argument — a small, fixed tool count the model can load in full). List the live set, with each tool's kind, via `isann mcp tools`:
 
 | Tool | Ask, e.g. |
 |:--|:--|
 | `node_info` | "What are this node's specs and version?" |
 | `list` | "List the registered nodes / installed models." |
-| `conn` | "Ping lab — is it reachable, and how fast?" |
+| `conn` | "Ping lab — is it reachable? Keep a warm link to it." |
 | `infer` | "Run this prompt on llama." |
 | `docker` | "Restart the sd container / show its status." |
 | `model` | "Search for / remove a model." |
 | `profile` | "Switch to this profile." |
 | `mesh` | "Turn the provider on / off." |
 | `rv` | "Add / switch the rendezvous endpoint." |
+| `cred` | "List my admission credentials / make this one active." |
 
 ## What's locked, what's open
 
@@ -58,6 +59,8 @@ Authentication is **two hops with different credentials**: Claude carries only t
 This reuses the node's normal control/data gate (see the [overview](../README.md)), so connecting Claude does **not** widen what the node allows: external inference stays sandboxed, and operation still requires an operator signature.
 
 > **Inference is async.** The `infer` run action submits the job and returns a `job_id` right away; `status` and `result` are **separate requests**. The agent should fetch the result when the job is likely done rather than polling in a tight loop.
+>
+> The MCP `infer` tool exposes `schema | run | status | result` only. **Sentence-chunk streaming** (`isann infer run -stream` + `isann infer chunk`) is a **CLI/SDK feature, not an MCP action** — it's a polling iterator meant for a TTS pipeline, which doesn't fit an agent's "submit, come back later" model. Over MCP, `result` returns the full text (and the engine JSON) once the job is done.
 
 ## Manage tokens
 

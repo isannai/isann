@@ -129,4 +129,4 @@ powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61
 
 ---
 
-← Back to **[README](../README.md)** · **[Q&A — cross-node & firewall](../qna/qna.md)** · **[Port policy](../reference/ports.md)**
+← Back to **[README](../README.md)** · **[Q&A](../qna/qna.md)** · **[Docker Desktop](docker-desktop.md)** · **[Port policy](../reference/ports.md)**

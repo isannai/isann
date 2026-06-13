@@ -30,7 +30,9 @@ For production, run a **stable** (even-`y`) release. The current `0.1.x` line is
 
 ## Getting Started
 
-**Requirements:** an NVIDIA GPU (driver ≥ 525 / CUDA 12.0). `ivm setup` installs the rest — WSL2 + Docker on Windows, Docker + NVIDIA Container Toolkit on Linux.
+**Requirements:** an NVIDIA GPU (driver ≥ 525 / CUDA 12.0). `ivm setup` installs the rest — WSL2 + **native docker-ce inside WSL** on Windows (not Docker Desktop), Docker + NVIDIA Container Toolkit on Linux.
+
+> **Using Docker Desktop?** iSANN runs on the native docker inside WSL, never Docker Desktop. **Quit Docker Desktop before `ivm setup`** (it blocks otherwise). For long-term coexistence, disable Docker Desktop's **WSL integration** for your Ubuntu distro. See **[Troubleshooting → Docker Desktop](troubleshooting/docker-desktop.md)**.
 
 > Download `ivm-<os>-amd64.zip` from **Releases**, then follow your platform below.
 > `--version` matches the release tag **exactly** — copy it from the **Releases** page (e.g. `0.1.2`).
@@ -43,8 +45,9 @@ Unzip `ivm-windows-amd64.zip` to your install root (e.g. `D:\iann`), then:
 .\ivm init          :: TLS cert + layout + PATH; writes activate.bat
 call activate       :: load PATH into THIS shell so ivm/isann/isannd resolve
                     ::   (or just open a new terminal instead)
-ivm check           :: detect WSL2 / Docker / toolkit / driver (read-only)
-ivm setup           :: UAC -> install WSL2 + Ubuntu + Docker  (reboot if prompted)
+ivm check           :: detect WSL2 / Docker / toolkit / driver (+ Docker Desktop conflicts)
+ivm setup           :: UAC -> install WSL2 + Ubuntu + native docker  (reboot if prompted)
+                    ::   first quit Docker Desktop if installed (iSANN uses native WSL docker)
 ivm install         :: fetch the latest node suite (isann/isannd/proxy/fetcher + conf/engines)
 
 ivm service install :: register isannd (UAC -> on-demand Scheduled Task, no password)
@@ -112,7 +115,9 @@ With the node up (`isann docker status` → **docker running**), set up an engin
 ## Help & reference
 
 - **[Port policy](reference/ports.md)** — inside a container every service listens on `8080`; on the host, **broker `8080`** and **provider `8090`**. Engine static IPs, debug ports, and the reasoning are here.
-- **[Q&A — cross-node & firewall](qna/qna.md)** — `--nodes` won't reach another node? Why "it worked yesterday," how to open the Windows Firewall for `isannd` (script), and how to tell a firewall block from a node being down.
+- **[RV admission (public / protected)](reference/rv-admission.md)** — gate who may register on a rendezvous. Issuer-signed credentials (node-bound or bearer) with a signed expiry, `auth.json` `mode`/`issuers`/`bind`, the signing recipe, and the node-side `isann cred` pool.
+- **[Q&A — nodes, firewall & Docker Desktop](qna/qna.md)** — `--nodes` won't reach another node? Why "it worked yesterday," how to open the Windows Firewall for `isannd` (script), how to tell a firewall block from a node being down, and Docker Desktop coexistence.
+- **[Troubleshooting — Docker Desktop](troubleshooting/docker-desktop.md)** — iSANN uses native docker inside WSL, never Docker Desktop. Quit it before `ivm setup`, disable WSL integration for coexistence, and resolve `/var/run/docker.sock` conflicts.
 - **[Troubleshooting — keep Windows awake](troubleshooting/windows-sleep.md)** — a sleeping/hibernating PC drops the node off the mesh (keepalive stops, hole-punch mapping expires). Disable sleep + NIC power-down so the node stays reachable.
 
 ---
@@ -120,7 +125,7 @@ With the node up (`isann docker status` → **docker running**), set up an engin
 ## CLI reference
 
 - **[`ivm` commands](cli/ivm-reference.md)** — node lifecycle: `install` · `switch` · `service` · `use` · `list` · `rm`
-- **[`isann` commands](cli/cli-reference.md)** — node client: `account` · `auth` · `docker` · `infer` · `mcp` · `mesh` · `model` · `profile` · discovery
+- **[`isann` commands](cli/cli-reference.md)** — node client: `account` · `auth` · `conn` · `docker` · `infer` · `mcp` · `mesh` · `model` · `profile` · discovery
 
 ## Roadmap
 

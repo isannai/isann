@@ -40,8 +40,8 @@
 | Command | Description | API |
 |---|---|---|
 | `ivm init` | First-time node setup: TLS cert + anchor + layout + PATH + activate. | `local` |
-| `ivm check` | Detect OS prerequisites (WSL2 / Docker / toolkit / driver). Read-only. | `local` |
-| `ivm setup` | Install OS prerequisites (Win UAC → WSL2/Docker; Linux sudo → Docker/toolkit). | `local` |
+| `ivm check` | Detect OS prerequisites (WSL2 / Docker / toolkit / driver) + Docker Desktop conflicts. Read-only. | `local` |
+| `ivm setup` | Install OS prerequisites (Win UAC → WSL2 + **native WSL docker**; Linux sudo → Docker/toolkit). Blocks if Docker Desktop is running. | `local` |
 | `ivm setup drivers` | Show NVIDIA driver status + manual install guidance (no auto-install). | `local` |
 | `ivm install` | Fetch a release suite into the cache (default latest). First install auto-activates. | `GitHub` |
 | `ivm switch` | Raw-activate a cached version into `bin/` (service-independent). | `local` |
@@ -58,24 +58,39 @@ First-time bootstrap — idempotent (preserve if present, create if absent). The
 - Activate the new PATH in the current shell with `call activate` (Windows) / `source ./activate` (Unix), or open a new terminal.
 
 ### `ivm check`
-Read-only OS prerequisite detection — installs/creates nothing and does not wake WSL. Prints a status table + whether setup scripts are bundled + an exit code.
+Read-only OS prerequisite detection — installs/creates nothing and does not wake WSL. Prints a status table + **Docker Desktop conflict diagnostics** + whether setup scripts are bundled + an exit code.
 - **Syntax**: `ivm check [-json]`
-- **API**: `local` — probes WSL/Docker/toolkit/driver locally.
+- **API**: `local` — probes WSL/Docker/toolkit/driver locally. On Windows it also reports Docker Desktop (installed / running / `/var/run/docker.sock` ownership).
 - **Exit**: `0` ready / `1` missing prerequisites / `2` usage error
 ```console
 $ ivm check
   iSANN prerequisite check  (os: windows)
-    [OK]  WSL2                     installed
-    [OK]  Docker Engine            reachable
-    [!!]  nvidia-container-toolkit not installed
+
+    [OK]  WSL2                     available
+    [OK]  Linux distro             Ubuntu-22.04
+    [OK]  Docker Engine            engine 27.1.1 (WSL)
+    [OK]  nvidia-container-toolkit nvidia-container-runtime present (WSL)
     [ -]  NVIDIA driver            driver 555 (CUDA 12.5)
+
+  Docker Desktop:
+    [ -] not installed (no conflict with native WSL docker)
+
   Setup scripts:  found (scripts\windows\install-isann-node.ps1)
 
-  [!!] Not ready - missing: nvidia-container-toolkit  ->  run 'ivm setup' (UAC/sudo)
+  [OK] Ready - docker daemon reachable.
 ```
+> **Docker Desktop conflict.** iSANN uses the **native docker-ce inside WSL**, never Docker Desktop. When Docker Desktop is present, `ivm check` shows its state and whether it is hijacking the docker socket:
+> ```
+>   Docker Desktop:
+>     [!!] running
+>     [!!] /var/run/docker.sock is served by Docker Desktop, not native docker-ce
+>          -> Quit Docker Desktop (tray -> Quit), or disable its WSL integration
+>             for Ubuntu-22.04, then run 'ivm check' again.
+> ```
+> When that conflict is shown, the `Docker Engine` row reads **not ready** (the socket isn't native dockerd). Quit Docker Desktop or turn off its **WSL integration** for your Ubuntu distro, then re-check. Details: **[Troubleshooting → Docker Desktop](../troubleshooting/docker-desktop.md)**.
 
 ### `ivm setup`
-Install OS prerequisites + elevate. ivm is a thin launcher — it gates (script present + DetectPrereqs) then triggers elevation; the bundled script handles idempotency / reboot / distro discovery. GPU required.
+Install OS prerequisites + elevate. ivm is a thin launcher — it gates (script present + DetectPrereqs) then triggers elevation; the bundled script handles idempotency / reboot / distro discovery. GPU required. On Windows it installs the **native docker-ce inside WSL** (not Docker Desktop).
 - **Syntax**: `ivm setup [-dry-run] [-force]` (`-dry-run` = preview, no elevation; `-force` = bypass already-ready)
 - **API**: `local` — Win: `ShellExecute "runas"` → admin PowerShell runs `install-isann-node.ps1`. Linux: `sudo ENGINES=none bash install-isann-node.sh`.
 ```console
@@ -83,6 +98,14 @@ $ ivm setup
   [OK] Elevated setup launched - a new Administrator window opened.
        After it finishes (and any reboot), run 'ivm check' to verify.
 ```
+> **⚠ Quit Docker Desktop first.** iSANN installs and uses **native docker-ce inside WSL**, not Docker Desktop. If Docker Desktop is **running**, `ivm setup` refuses and asks you to quit it — installing into WSL while Desktop's WSL integration is active causes PATH/socket conflicts:
+> ```
+> $ ivm setup
+>   [!!] Docker Desktop is running.
+>        iSANN uses native docker inside WSL, not Docker Desktop.
+>        Quit Docker Desktop (tray icon -> Quit), then run 'ivm setup' again.
+> ```
+> Quit it from the system tray and re-run. Keeping it *installed but quit* is fine; for long-term coexistence, also disable its **WSL integration** for your Ubuntu distro so it never claims `/var/run/docker.sock`. See **[Troubleshooting → Docker Desktop](../troubleshooting/docker-desktop.md)**.
 
 ### `ivm setup drivers`
 Shows NVIDIA driver status + manual install guidance only (no privilege). ivm does not auto-install drivers (hardware/version variety + brick risk).

@@ -63,6 +63,7 @@ Pure local — calls `pkg/wallet` directly, never touches isannd (except `whoami
 | `isann account list [-json]` | Alias / address / file / owner-role table. | `local` |
 | `isann account whoami [-json]` | Print the alias **currently unlocked** in the isannd session (reverse-mapped from accounts.json) + its **session expiry and remaining TTL**; `not unlocked` otherwise. | `GET /auth/status` + local |
 | `isann account pk --alias a` | Decrypt + print the raw private key (passphrase prompt + warning). | `local` |
+| `isann account issue --alias issuer (--node EOA \| -bearer) --expire <date\|dur> [--passphrase p] [-json]` | **Issuer side**: sign a protected‑RV admission credential offline → prints the operator's `cred add` line (or `-json`). `--expire` is required (date `2026-12-31` / RFC3339 / duration `90d`·`24h`). Issuer address must be in the RV's `auth.json`. See **[RV admission](../reference/rv-admission.md)**. | `local` |
 | `isann account rm --alias a [-y]` | Remove a keystore (owner key protected — transfer first). | `local` |
 
 ```console
@@ -103,11 +104,14 @@ Passphrase priority for `unlock`: `--passphrase-stdin` > `ISANN_PASSPHRASE` > `-
 
 ## conn
 
-Connectivity diagnostics between nodes. Session required (the probe is a signed cross-node round-trip).
+Connectivity to other nodes — a probe (`ping`) plus a **warm-link pool** (`keep` / `drop` / `list`). Session required (each touches a signed cross-node round-trip). All take `--nodes <id|alias>[,…]` and fan a comma list out in parallel.
 
 | Command | Description | API | Nodes |
 |---|---|---|---|
-| `isann conn ping --nodes <list> [--count N]` | Dial each node through the real cross-node path (RV lookup + hole-punch + HTTP/3) and report reachability + round-trip latency + the address it connected through. | `GET /conn/ping?node=<n>` | ✅ (fan-out) |
+| `isann conn ping --nodes <list> [--count N]` | Dial each node through the real cross-node path (RV lookup + hole-punch + HTTP/3) and report reachability + RTT + the address it answered through. | `GET /conn/ping?node=<n>` | ✅ (fan-out) |
+| `isann conn keep --nodes <list>` | **Pin** a warm link — establish the peer's QUIC connection now and keep it warm, so a later `infer`/`docker` to that node skips the RV-lookup + hole-punch. | `POST /conn/keep?node=<n>` | ✅ (fan-out) |
+| `isann conn drop --nodes <list>` | Release pinned link(s). Idempotent (`not_kept` when it wasn't pinned). | `POST /conn/drop?node=<n>` | ✅ (fan-out) |
+| `isann conn list` (alias `ls`) | Show pinned warm links + their state (`warm`/`degraded`/`connecting`), last RTT, and VIA. | `GET /conn/list` | — |
 
 ```console
 $ isann conn ping --nodes office,lab,0xBADa…7CEe
@@ -115,18 +119,36 @@ NODE      RESULT   RTT       VIA
 office    ok        42.1 ms  203.0.113.7:7443 (wan)
 lab       ok         7.8 ms  192.168.0.5:7443 (lan)
 0xBADa…   timeout      —     —
+
+$ isann conn keep --nodes office,lab
+NODE    RESULT
+office  kept
+lab     kept
+
+$ isann conn list
+NODE    STATE  RTT       VIA
+office  warm    41.7 ms  203.0.113.7:7443 (wan)
+lab     warm     7.5 ms  192.168.0.5:7443 (lan)
+
+$ isann conn drop --nodes office
+NODE    RESULT
+office  dropped
 ```
 
-`--nodes` takes one target or a comma list; favorites (aliases) resolve like every other cross-node command. `--count N` (1-10) pings each node N times and reports the **best** RTT. **VIA** is the address that answered — `lan` (private IP) vs `wan` (public; direct or hole-punched, not yet distinguished). Reachability = *the peer answered* — even a `403` (you're not its operator) proves the connection punched through, so it counts as `ok`. Per-node isolation: one node failing never drops the others.
+- **ping** — `--count N` (1-10) pings each node N times, reports the **best** RTT. Reachability = *the peer answered* — even a `403` (you're not its operator) proves the connection punched through, so it counts as `ok`.
+- **keep/drop/list** — isannd holds the pinned QUIC connections (the outbound transport already pools + QUIC-keepalives them) and a background keeper re-probes every ~25s, so a link that drops (NAT rebind / peer restart) is **re-established before your next request needs it**. In-memory only — re-pin after an isannd restart. Keepalive signs with the unlocked wallet; lock it and the link goes `degraded`.
+- **VIA** is the address that answered — `lan` (private IP) vs `wan` (public; direct or hole-punched, not yet distinguished). Per-node isolation: one node failing never drops the others.
 
 ## docker
 
 Container preflight + lifecycle. **isannd owns the Docker lifecycle.** Cross-node: status/warmup/shutdown/ps/start/stop/restart. Not: create/rm/inspect/probe/pull.
 
+> **Windows = native WSL docker only.** isannd targets the **native docker-ce inside your WSL Ubuntu** (`wsl -d <distro> -- /usr/bin/docker -H unix:///var/run/docker.sock …`), **never Docker Desktop** — not even as a fallback. `warmup` starts that daemon, and every docker op (`create` / `pull` / `ps`) goes to it. If Docker Desktop is installed, run `ivm check` for a conflict report; see **[Troubleshooting → Docker Desktop](../troubleshooting/docker-desktop.md)**. (`isann model pull` downloads model weights to disk via the fetcher — it does **not** use docker, so Docker Desktop never affects it.)
+
 | Command | Description | API | Nodes |
 |---|---|---|---|
-| `isann docker status` | WSL/docker readiness (side-effect free). | `GET /docker/status` | ✅ |
-| `isann docker warmup` | Boot WSL+docker in the background (fire-and-forget). | `POST /docker/warmup` | ✅ |
+| `isann docker status` | WSL/docker readiness (side-effect free; native WSL docker). | `GET /docker/status` | ✅ |
+| `isann docker warmup` | Boot WSL **and start native dockerd inside it** (fire-and-forget). | `POST /docker/warmup` | ✅ |
 | `isann docker shutdown [--force]` | `wsl --shutdown` (Windows only). | `POST /docker/shutdown [?force=1]` | ✅ |
 | `isann docker ps` | Container list. | `GET /docker/ps` | ✅ (`<id>@<ip:port>`) |
 | `isann docker create <engine>` | Compose-based spawn (streaming). | `POST /docker/create` | — |
@@ -137,6 +159,11 @@ Container preflight + lifecycle. **isannd owns the Docker lifecycle.** Cross-nod
 | `isann docker pull <image>` | Image pull (streaming). | `POST /docker/pull` | — |
 
 ```console
+$ isann docker warmup           # boots WSL, then starts native dockerd inside it
+STEP     OK  DETAIL
+wsl      ok  Ubuntu-22.04 running
+dockerd  ok  started               # 'already running' on re-run (idempotent)
+
 $ isann docker status
 COMPONENT  STATE    DETAIL
 wsl        running  Ubuntu-22.04
@@ -174,10 +201,11 @@ Inference jobs. **Different namespace** — not an `/internal/api/...` admin pat
 
 | Command | Description | API | Nodes |
 |---|---|---|---|
-| `isann infer run --engine e [--<param>..] [-stdin] [--out f] [--preset n] [--nodes id] [--rv alias\|url] [--provider h:p]` | Submit a job → `job_id` (async; fetch with `result`). | `POST {base}/svc/<svc>/v1/jobs` | ✅ |
+| `isann infer run --engine e [--<param>..] [-wait] [-stream] [--chunk-mode m] [-stdin] [--out f] [--preset n] [--req-id id] [--nodes id] [--rv alias\|url] [--provider h:p]` | Submit a job → `job_id` (async; fetch with `result`). `-wait` blocks to completion; `-stream` = sentence-chunk streaming (text engines). | `POST {base}/svc/<svc>/v1/jobs` | ✅ |
 | `isann infer chat --engine e [--system s] [--temperature f] [--max-tokens n]` | Multi-turn REPL (`/reset`, `/exit`). | `POST {base}/svc/<svc>/v1/jobs` per turn | ✅ |
-| `isann infer status <id>` | Job status. | `GET {base}/v1/jobs/<id>` | ✅ |
-| `isann infer result <id> [--out f] [-consume]` | Finished result (text→stdout, image/audio→file). | `GET {base}/v1/jobs/<id>/result` | ✅ |
+| `isann infer status <id>` | Job status (+ `chunk_count` for `-stream` jobs). | `GET {base}/v1/jobs/<id>` | ✅ |
+| `isann infer chunk <id> --index n` | **Stream**: the n-th sentence chunk as JSON. `index == chunk_count` (once done) = EOF marker (metadata, no content). | `GET {base}/v1/jobs/<id>/chunk?index=n` | ✅ |
+| `isann infer result <id> [--out f] [-consume] [-json]` | Finished result: content (text→stdout, image/audio→file); `-json` = full engine JSON incl. usage/metadata. | `GET {base}/v1/jobs/<id>/result` | ✅ |
 | `isann infer rm <id>` | Delete a finished job. | `DELETE {base}/v1/jobs/<id>` | ✅ |
 | `isann infer queue --engine e` | Service queue stats. | `GET {base}/v1/queue/stats?service=<svc>` | ✅ |
 
@@ -192,6 +220,10 @@ saved out.png (2451233 bytes)
 ```
 
 For `result`, `--proj` extracts a field — e.g. `--proj choices[0].message.content`. `infer` shapes output client-side.
+
+**Streaming (`-stream`)** — sentence-chunked, **same async pattern** (no held connection): the submit returns a `job_id` at once, and the node assembles the engine's token stream into **sentence chunks** as it generates them. Poll `infer status` (`chunk_count` grows), pull each completed sentence with `infer chunk <id> --index n`, and `infer result` returns the full text on completion (`-json` for the reassembled engine JSON + usage/finish_reason). Chunk indices `0..N-1` are sentences; the chunk at `index == chunk_count` (only once done) is the **EOF marker** — `{"eof":true, …finish_reason/usage/model…}` with no content — so an SDK iterator reads `0,1,2,…` and stops on `eof` without knowing `N` in advance (while running, an index ≥ `chunk_count` returns `202 pending`). `--chunk-mode strict|sentence|low_latency` tunes the boundary (default `sentence`: `.!?。！？…;`+newline; `strict` drops `;`; `low_latency` adds `,:` for clause-level, lower first-audio latency). Built for TTS — feed completed sentences to a synth (e.g. Piper) while the model keeps generating. Text engines (llama/vllm) only; the engine must speak OpenAI SSE.
+
+**Idempotent submit (`--req-id`)**: a submit is async (you get a `job_id`, then `result` fetches it), so a lost submit-ack or a flaky/mobile network leaves you unsure whether the job was created. Pass `--req-id <key>` (any URL-safe token) and the provider keys the job by it — **a retry with the same `--req-id` returns the existing job instead of running a duplicate** (rides as `X-ISANN-Request-Id`; dedup via the provider queue). Omit it and the provider generates a job id (legacy behaviour). The retry policy itself lives in the **caller** (re-issue with the same `--req-id` on timeout / `not found`); the provider only guarantees idempotency. *(at-least-once retry + idempotency key = effectively-once.)*
 
 **Cross-node (`--nodes`)**: isannd self-dials the RV and dials the peer directly — **no broker needed on the client**. The RV is the `rv use` default, overridable per-command with `--rv <alias|url>` (an alias also carries that RV's stored control-addr override; a bare URL derives `host:9100`). `run`/`chat`/`status`/`result`/`rm`/`queue` all accept `--rv`. Pass `--nodes` (and `--rv`) to **every** sub-command for a job — the job lives on the remote node, so `status`/`result` without `--nodes` query the local provider and 502.
 
@@ -251,12 +283,13 @@ $ claude mcp add --transport http isann \
 |---|---|---|
 | `node_info` | read | — |
 | `list` | read | `what`: nodes \| models \| profiles \| containers \| mesh \| rvs |
-| `conn` | control* | `action`: ping · `node` (id\|alias) — *cross-node* reachability + latency; needs unlock (signs) |
+| `conn` | mixed* | `action`: ping \| keep \| drop \| list · `node` (id\|alias, for ping/keep/drop) — *cross-node* + warm-link pool; ping/keep/drop need unlock |
 | `infer` | read | `action`: schema \| run \| status \| result · `engine` · `input{}` · `job_id` |
 | `docker` | control | `action`: start \| stop \| restart \| rm · `name` · `force?` |
 | `mesh` | control | `action`: start \| stop \| on \| off · `component`: provider \| broker · `now?` |
 | `profile` | control | `action`: get \| use · `engine` · `name` |
 | `rv` | control | `action`: add \| rm \| use · `alias` · `url?` |
+| `cred` | mixed | `action`: list \| add \| use \| rm · `alias` · (`sig`/`issued`/`expire`/`bind?` for add) — protected-RV admission; add/use/rm operator |
 | `model` | mixed | `action`: info \| search \| rm · (`url`/`query`/`engine`+`kind`+`name`) |
 
 `isann mcp tools` prints this list. **Control actions** require an **unlocked operator** — when the node is locked they return a *"locked — run `isann auth unlock`"* result so the assistant can prompt you (read actions like `infer`, `list`, `model search` are not gated). Gating is **per action**, so a tool's reads work while locked even if its writes don't. Tools act on **this node** — except `conn`, which probes another node via a signed cross-node round-trip; `--nodes`-style cross-node targeting for the other tools is a later addition. e.g. *"stop llama"* → `docker(action=stop, name=llama)`; *"generate an image"* → `infer(action=run, engine=sd, input={…})`.
@@ -347,7 +380,7 @@ $ isann profile use --engine llama --name highmem
 
 ## rv
 
-Rendezvous bookmarks (isannd owns `rvs.json`). All leaves support `--nodes`; session required.
+Rendezvous bookmarks (isannd owns `rvs.json`). `add`/`list`/`rm`/`use` support `--nodes`. Session required. (The protected-RV admission credential moved to its own **[cred](#cred)** namespace.)
 
 | Command | Description | API | Nodes |
 |---|---|---|---|
@@ -368,5 +401,30 @@ $ isann rv use --alias office
 The **control addr** is the RV TCP endpoint isannd self-dials for cross-node lookups. By default it's the URL host + port `9100`; `--control <host:port>` overrides it for an RV on a non-standard control port. `isann rv list` shows the effective value in the `CONTROL` column.
 
 `-remote` counts are the Gate's live aggregation of each RV's registered nodes. **`CONSUMERS`** counts client-only nodes (role `consumer`) that register only for NAT hole-punch — they are **counted but never listed** in discovery (`list nodes` / the directory), by design.
+
+## cred
+
+Protected-RV admission credentials. A rendezvous runs in **`public`** mode (anyone with a valid register signature may register — the default) or **`protected`** mode (a registering node must present an issuer-signed credential). The mode + authorized issuers live in the **RV's own `auth.json`** (next to its `rendezvous.json`), not on the node.
+
+A credential is **issuer-bound, not RV-bound** — it admits the node to any RV that trusts its issuer. So the node keeps a **named pool** (`artifacts/cred.json`) and points `active` at the one isannd attaches on register; switch with `cred use`, no re-issuance. Session required.
+
+| Command | Description | API |
+|---|---|---|
+| `isann cred add --alias n --sig <hex> --issued <ms> --expire <ms> [--bind bearer]` | Install an issuer-signed credential under an alias (copy values from the issuer's `account issue` output). First one added becomes active. | `POST /cred` |
+| `isann cred list` | Pool table — `ALIAS / ISSUER (recovered) / EXPIRE / STATUS (valid\|expired) / BIND / ACTIVE (*)`. | `GET /cred` |
+| `isann cred use --alias n` | Make a credential active (attached on register). | `POST /cred/use` |
+| `isann cred rm --alias n` | Remove by alias (clears active if it was active). | `DELETE /cred?alias=n` |
+
+```console
+$ isann info                 # copy node_id (your node's EOA, e.g. 0xabc…)
+# → give node_id to the issuer; they `account issue` and return { sig, issued, expire }
+$ isann cred add --alias game-rv --sig 0x<sig> --issued 1733972400000 --expire 1798675199000
+[isann] added "game-rv" (now active)
+$ isann cred list
+ALIAS    ISSUER   EXPIRE                STATUS  BIND  ACTIVE
+game-rv  0xGAME…  2026-12-31T23:59:59Z  valid   node  *
+```
+
+isannd attaches the **active** credential to its register frames automatically (re-read each FullSync, so a swap or `cred use` needs no restart). All three roles (provider / broker / consumer) require one on a protected RV; against a public RV it is simply unused. The credential is a plain `personal_sign` (eth_sign) of a canonical string whose lifetime is the issuer-signed `expire` — see **[RV admission model](../reference/rv-admission.md)** for the RV-operator config and the issuer signing recipe. Operator session required.
 
 > Cross-node support is summarized in **[Common flags](#common-flags)** at the top.

@@ -1,6 +1,6 @@
-# Q&A — cross-node & firewall
+# Q&A — nodes, firewall & Docker Desktop
 
-> Troubleshooting `--nodes` (and Claude/MCP cross-node) when another node won't answer.
+> Troubleshooting `--nodes` (and Claude/MCP cross-node) when another node won't answer, plus Docker Desktop coexistence on Windows.
 
 ---
 
@@ -114,6 +114,51 @@ A plain peer node (no RV/gate) only needs `isannd` reachable inbound for hole-pu
 
 ---
 
+## Docker Desktop (Windows)
+
+> iSANN uses the **native docker-ce inside WSL**, never Docker Desktop — not as a backend, not as a fallback. Full guide: **[Troubleshooting → Docker Desktop](../troubleshooting/docker-desktop.md)**.
+
+### Q. What does "WSL Integration → Ubuntu toggle OFF" actually do?
+
+Docker Desktop runs its engine in its own hidden WSL distro (`docker-desktop`). The **WSL Integration** toggle, *per distro*, makes Docker Desktop reach **into that distro** — it drops a `docker` CLI shim on the `PATH` and points the docker context / `/var/run/docker.sock` at **Docker Desktop's** engine. So with it **on for your Ubuntu**, typing `docker …` inside Ubuntu talks to Docker Desktop, not a native dockerd.
+
+iSANN installs and drives its **own** native docker-ce in that same Ubuntu (`ivm setup`). **Turning the toggle off** (or quitting Docker Desktop) stops Docker Desktop from injecting its shim/socket, leaving the native dockerd to own `/var/run/docker.sock`.
+
+- iSANN already bypasses the shim at runtime (absolute `/usr/bin/docker` + explicit `-H unix:///var/run/docker.sock`), so **off is not strictly required** — it's the clean state.
+- It becomes **mandatory** if `ivm check` reports `/var/run/docker.sock is served by Docker Desktop` (Docker Desktop actually grabbed the socket → native dockerd unreachable).
+- Quitting Docker Desktop has the same effect as off (nothing to inject while it isn't running).
+
+### Q. `ivm setup` says "Docker Desktop is running." What do I do?
+
+Quit Docker Desktop, then re-run `ivm setup`. iSANN installs and uses native docker-ce inside WSL; installing while Docker Desktop's **WSL integration** is active causes PATH/socket conflicts, so setup refuses by design.
+
+- **Taskbar tray → Docker icon → Quit Docker Desktop**, then `ivm setup` again.
+- Keeping Docker Desktop *installed but quit* is fine.
+
+### Q. Can I keep Docker Desktop installed alongside iSANN?
+
+Yes — they live in different WSL distros (`docker-desktop` vs your `Ubuntu`) with separate sockets. The one trap is Docker Desktop's per-distro **WSL Integration**: if it's enabled for your Ubuntu distro it injects a `docker` shim + context there. iSANN bypasses that at runtime (absolute `/usr/bin/docker` + `-H unix:///var/run/docker.sock`), but for a clean setup:
+
+- **Docker Desktop → Settings → Resources → WSL Integration → turn the Ubuntu distro toggle off → Apply & Restart.**
+
+`ivm check` reports Docker Desktop's state so you can confirm there's no conflict.
+
+### Q. `ivm check` says "/var/run/docker.sock is served by Docker Desktop, not native docker-ce." 
+
+Docker Desktop has claimed the docker socket in your Ubuntu distro, so the native dockerd isn't reachable there (the `Docker Engine` row shows **not ready**). Fix:
+
+1. **Quit Docker Desktop**, or disable its **WSL integration** for that distro (above).
+2. `isann docker warmup` — starts native dockerd inside WSL.
+3. `ivm check` — `Docker Engine [OK] ... (WSL)` confirms native docker-ce.
+
+> This guard is deliberate: rather than silently driving Docker Desktop, iSANN refuses the socket when it isn't native dockerd and tells you to clean it up.
+
+### Q. Does Docker Desktop affect `isann model pull` / model downloads?
+
+**No.** `isann model pull` downloads model **weights to disk** via the fetcher — it never uses docker. Docker Desktop only matters for actual docker operations (engine image `docker pull`, `docker create`, `docker ps`), which iSANN always points at native WSL dockerd.
+
+---
+
 ## Q. How do I tell it apart — firewall vs NAT vs node down?
 
 | You see | Most likely | Do |
@@ -124,4 +169,4 @@ A plain peer node (no RV/gate) only needs `isannd` reachable inbound for hole-pu
 
 ---
 
-← Back to **[README](../README.md)** · **[Port policy](../reference/ports.md)** · **[`isann` reference](../cli/cli-reference.md)**
+← Back to **[README](../README.md)** · **[Docker Desktop](../troubleshooting/docker-desktop.md)** · **[Port policy](../reference/ports.md)** · **[`isann` reference](../cli/cli-reference.md)**
