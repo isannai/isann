@@ -33,7 +33,7 @@ claude mcp add --transport http isann \
 
 ## Tools
 
-The server exposes **10 tools**, one per `isann` namespace (the action is an `enum` argument — a small, fixed tool count the model can load in full). List the live set, with each tool's kind, via `isann mcp tools`:
+The server exposes **10 tools**, one per `isann` namespace (the action is an `enum` argument — a small, fixed tool count the model can load in full). List the live set, with each tool's source and kind, via `isann tool list`:
 
 | Tool | Ask, e.g. |
 |:--|:--|
@@ -70,6 +70,7 @@ This reuses the node's normal control/data gate (see the [overview](../README.md
 | `isann mcp token list` | List issued tokens (id · label · created). |
 | `isann mcp token rotate <id>` | Issue a replacement, then revoke `<id>`. |
 | `isann mcp token revoke <id>` | Revoke one token immediately. |
-| `isann mcp tools` | Show the tools the server currently exposes (with read/control kind). |
 
-Full flags: **[`isann` reference → mcp](../cli/cli-reference.md)**.
+To see the tools the server exposes, use the protocol-neutral catalog: **`isann tool list`** (SOURCE = builtin/addon · KIND = read/control).
+
+Full flags: **[`isann` reference → tool](../cli/cli-reference.md#tool)** · **[→ mcp](../cli/cli-reference.md#mcp)**.

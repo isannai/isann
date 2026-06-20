@@ -17,14 +17,15 @@
 2. **Version store layout** (nvm-style — multiple versions coexist):
    ```
    <root>/
-     bin/{isann,isannd,isann-fetcher,proxy}.exe   <- active binaries (swapped by `switch`)
-     conf/ · engines/ · manifests/                 <- operator state (seeded once)
+     bin/{isann,isannd,isann-fetcher,proxy}.exe   <- version code (replaced by `switch`)
+     manifests/   (+ web/ when a build ships it)    <- version code (replaced by `switch`)
+     conf/ · engines/                               <- operator state (seeded once, then preserved)
      .isann/
-       versions/<tag>/{bin,conf,engines,manifests,release.json}   <- cache (per-version originals)
+       versions/<tag>/{bin,manifests,conf,engines,release.json}   <- cache (per-version originals)
        active                                       <- active tag pointer
        downloads/<tag>/                             <- download staging
    ```
-3. **bin-only swap + seed-once** — `switch`/`use` replace only `bin/` every time. `conf/` · `engines/` · `manifests/` are seeded **once** and then preserved (operators edit conf values and engine `.env` files). A new version's changes remain in `versions/<tag>/` as a template for manual diff.
+3. **version-code swap + seed-once** — `switch`/`use` replace **version code** every time: `bin/` and `manifests/` (engine definitions — parser / api schema / queue defaults), plus `web/` when a build ships the broker console. **Operator state** — `conf/` and `engines/` — is seeded **once** and then preserved (operators edit conf values + engine `.env` files; tune queue knobs via `provider.json` overrides, not the manifest, since `switch` overwrites it). A new version's changes stay in `versions/<tag>/` as a template for manual diff.
    - To reset conf to a version's defaults: empty `conf/` entirely, then `switch` again (empty → re-seed).
 4. **Integrity** — `install` records `release.json` (per-file sha256 + provenance: tag/digest/url/size/time). `switch` runs `verifyVersionCache` before activating, so a corrupted cache is never activated.
 5. **Privilege escalation** — `service` (install/uninstall/start/stop) and `use` control the OS service, so they need admin. On Windows, when not elevated, ivm pops a UAC window and re-runs the same command (closes on success, stays open on failure). `ivm service status` is read-only — no elevation.
@@ -54,7 +55,7 @@
 ### `ivm init`
 First-time bootstrap — idempotent (preserve if present, create if absent). The only real content is the cert + anchor; everything else is empty dirs + PATH registration + an activate script.
 - **Syntax**: `ivm init [--root <path>] [-cert] [-nopath]` (`-cert` = force re-issue the cert = changes node identity; `-nopath` = skip PATH registration)
-- **API**: `local` — cert via `installer.EnsureCert`; PATH via shell rc (Unix) / `HKCU\Environment\Path` + `WM_SETTINGCHANGE` (Win).
+- **API**: `local` — cert via `installer.EnsureCert` → writes **`artifacts/certs/cert.pem` + `key.pem`** (this node's transport identity; `-cert` regenerates them = new identity); anchor `isann.config.json` (the root marker `ivm` walks up to find); PATH via shell rc (Unix) / `HKCU\Environment\Path` + `WM_SETTINGCHANGE` (Win).
 - Activate the new PATH in the current shell with `call activate` (Windows) / `source ./activate` (Unix), or open a new terminal.
 
 ### `ivm check`
@@ -92,7 +93,9 @@ $ ivm check
 ### `ivm setup`
 Install OS prerequisites + elevate. ivm is a thin launcher — it gates (script present + DetectPrereqs) then triggers elevation; the bundled script handles idempotency / reboot / distro discovery. GPU required. On Windows it installs the **native docker-ce inside WSL** (not Docker Desktop).
 - **Syntax**: `ivm setup [-dry-run] [-force]` (`-dry-run` = preview, no elevation; `-force` = bypass already-ready)
-- **API**: `local` — Win: `ShellExecute "runas"` → admin PowerShell runs `install-isann-node.ps1`. Linux: `sudo ENGINES=none bash install-isann-node.sh`.
+- **API**: `local` — Win: `ShellExecute "runas"` → admin PowerShell runs `install-isann-node.ps1`. Linux: `sudo ENGINES=none bash install-isann-node.sh` (container runtime only — engine images come later via `isann docker create`).
+- **Distro** (Windows): reuses an existing WSL distro if present (passed to the script as `-Distro`), else installs **Ubuntu-22.04**. No auto-reboot — the script tells you if a reboot is needed (Windows' first WSL enable).
+- **macOS** is out of scope — `ivm setup` exits with a note to install Docker Desktop manually.
 ```console
 $ ivm setup
   [OK] Elevated setup launched - a new Administrator window opened.
@@ -119,28 +122,35 @@ Fetch a release zip into the local cache (`.isann/versions/<tag>/`). Default lat
 - **⚠️ Tags match exactly** — `--version` must equal the GitHub release tag verbatim. If the page shows `0.1.2`, use `--version 0.1.2`; if `v0.1.1`, use `--version v0.1.1`. ivm does not add or strip a `v` prefix — **copy the tag from the Releases page**.
 ```console
 $ ivm install --version 0.1.2
-0.1.2  downloading isann-windows-amd64.zip  43.6 MB
-  [==============================]  100%
-0.1.2  extracted -> .isann/versions/0.1.2 (bin conf engines manifests)
-0.1.2  release.json written (digest verified)
-Switched to 0.1.2 -- bin/ replaced (version binaries).   # first install only
+Downloading isann-windows-amd64.zip  (43.6 MB)
+  43.6 MB / 43.6 MB  (100%)
+Installed 0.1.2 → .isann/versions/0.1.2
+
+  First install — activating 0.1.2 ...          # first install only
+Switched to 0.1.2 — bin/ manifests/ replaced (version code).
+  seeded (first time): conf/ engines/
 ```
+> Already up to date → `0.1.2 already installed and up to date (...)`. When a version is already active, install just caches and prints an `Activate: ivm switch --version <tag>` hint instead of auto-switching.
 
 ### `ivm switch`
-Raw-swap the cached `<tag>` into the live root — **does not touch the service** (a manual escape-hatch that works even when the service is stopped/absent). Replaces `bin/` + seeds `conf/engines/manifests` once + updates `.isann/active`. Runs `verifyVersionCache` (release.json check) before activating.
+Raw-swap the cached `<tag>` into the live root — **does not touch the service** (a manual escape-hatch that works even when the service is stopped/absent). Replaces **version code** (`bin/` + `manifests/`, and `web/` when shipped) + seeds `conf/`/`engines/` once + updates `.isann/active`. Runs `verifyVersionCache` (release.json check) before activating.
 - **Syntax**: `ivm switch --version <tag>`
 - **API**: `local` — no privilege. A running isannd.exe is locked on Windows, so it is moved aside via the `.exe.old` trick (the live daemon keeps the old binary until restarted).
 ```console
 $ ivm switch --version 0.1.0
-Switched to 0.1.0 -- bin/ replaced (version binaries).
-  preserved (operator state, not overwritten): conf/ engines/ manifests/
+Switched to 0.1.0 — bin/ manifests/ replaced (version code).
+  preserved (operator state, not overwritten): conf/ engines/
+
+  Service not controlled by switch. Run the node:
+    ivm service install      (register + start as a service/daemon)
+    or launch bin\isannd.exe manually
 ```
-> If the service is up during `switch`, `bin/` is replaced but the running daemon stays on the old binary — restart it (`ivm service stop` → `ivm service start`) or use `ivm use`.
+> `switch` never controls the service, so it always reminds you to run the node afterward. If the service is up during `switch`, `bin/` is replaced but the running daemon stays on the old binary — restart it (`ivm service stop` → `ivm service start`) or use `ivm use` (which does stop → switch → start for you).
 
 ### `ivm service`
 Register/control isannd as a service/daemon. It targets the stable path `<root>/bin/isannd[.exe] -config <root>/conf/isannd.json`, so a version swap needs no re-registration. **Registration is only via this command** (`use` does not register).
-- **Syntax**: `ivm service <install | uninstall | status | start | stop>`
-- **API**: `service mgr` — **Windows = on-demand Scheduled Task (LogonType S4U)** (see Appendix A) / **Linux = systemd** (`register-isannd.sh` + `systemctl`).
+- **Syntax**: `ivm service <install | uninstall | status | start | stop>` (`uninstall` also accepts the alias `remove`)
+- **API**: `service mgr` — **Windows = on-demand Scheduled Task (LogonType S4U)** (see Appendix A) / **Linux = systemd** (`register-isannd.sh` + `systemctl`). ⚠️ On **Linux**, `install` also **enables + starts** the unit (systemd convention); on **Windows** `install` registers an on-demand task with **no auto-start** — `start` it separately.
 - **Privilege**: install/uninstall/start/stop = UAC (Win, self-elevate) / sudo (Linux). **`status` is read-only** (no privilege).
 
 | sub | action |

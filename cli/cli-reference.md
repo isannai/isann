@@ -17,6 +17,7 @@
 2. **Session**: most commands require a prior `isann auth unlock` (the `.isann/session` token is auto-attached as `X-ISANN-Session`).
 3. **Cross-node forward**: a `--nodes` command always wires through **`POST /internal/api/nodes/forward`** — the `adminPath` (e.g. `/rv/add`, `/docker/ps`) is carried in the body: local isannd → peer `/admin/<path>` → peer's own `/internal/api/<path>` loopback. The "API" below is the **local (single-node)** path; cross-node carries the same sub-path in the forward.
    - ⚠️ Query-string options are **not** forwarded: `auth list --roles`, `docker shutdown --force`, `profile rm --force`. (Body options like `--timeout` are fine.)
+4. **Idempotent mutations**: changing commands succeed when the target is **already in the desired state** (exit 0 + a `[ok]`/`[skip]` message, not an error) — `create`/`add`/`pull` skip when present, `rm` is nothing-to-do when absent, `auth unlock` re-issues the session. `--force` is the only destructive overwrite. Safe to re-run (e.g. in a [recipe](#recipe)).
 
 > Node bootstrap is split out — layout/cert = **`ivm init`**, first owner registration = **`isann auth transfer --owner`**. `isann init` has been **removed**.
 
@@ -27,7 +28,7 @@ Shared across commands — listed once here instead of repeating per command. Ea
 | Flag(s) | Applies to |
 |:--|:--|
 | **`-json`** · **`-pretty`** · **`--proj <p>`** — output shaping (raw / indent / field projection) | **all read commands** (every namespace) |
-| **`--nodes <id>`** — run on a peer node (cross-node) | **✅** `info` · `infer` · `mesh` · `profile` · `rv` (all sub-commands) · `auth` (transfer/add/rm/list) · `docker` (status/warmup/shutdown/ps/start/stop/restart) · `list` (models/loras/vaes/profiles) · `model` (pull/rm/list)  —  **✗** `account` · `favorite` · `ghcr` · `mcp` · `preset` |
+| **`--nodes <id>`** — run on a peer node (cross-node) | **✅** `agent` (run/chat) · `auth` (transfer/add/rm/list) · `conn` (ping/keep/drop — client-side fan-out) · `docker` (status/warmup/shutdown/ps/start/stop/restart) · `infer` (all sub-commands) · `list` (models/loras/vaes/profiles) · `mesh` (all) · `model` (pull/rm/list) · `profile` (all except `pull`) · `rv` (all)  —  **✗** `account` · `favorite` · `ghcr` · `info` · `mcp` · `policy` · `preset` · `recipe` · `tool` |
 
 > Cross-node wires through `POST /internal/api/nodes/forward` (adminPath in body). **Query-string** options are not forwarded (`auth --roles`, `docker --force`, `profile rm --force`); body options are.
 
@@ -37,7 +38,7 @@ Shared across commands — listed once here instead of repeating per command. Ea
 
 | Command | Description | API | Nodes |
 |---|---|---|---|
-| `isann info` | Node version / OS / GPU / node_id (2-column). | `GET /info` | ✅ |
+| `isann info` | Node version / OS / GPU / node_id + store paths (2-column). | `GET /info` | — |
 | `isann version` | CLI build version + local isannd version (2 lines). | `GET /version` (optional) | — |
 
 ```console
@@ -126,9 +127,9 @@ office  kept
 lab     kept
 
 $ isann conn list
-NODE    STATE  RTT       VIA
-office  warm    41.7 ms  203.0.113.7:7443 (wan)
-lab     warm     7.5 ms  192.168.0.5:7443 (lan)
+NODE    STATE  RTT      QUEUE  RUN  DONE  AVG    AGE
+office  warm   41.7ms   0      0    128   1.2s   12s
+lab     warm    7.5ms   0      1    540   0.8s    3s
 
 $ isann conn drop --nodes office
 NODE    RESULT
@@ -141,38 +142,45 @@ office  dropped
 
 ## docker
 
-Container preflight + lifecycle. **isannd owns the Docker lifecycle.** Cross-node: status/warmup/shutdown/ps/start/stop/restart. Not: create/rm/inspect/probe/pull.
+Container preflight + lifecycle. **isannd owns the Docker lifecycle.** Cross-node: status/warmup/shutdown/ps/start/stop/restart. Not: prepare/create/rm/inspect/probe/pull.
 
 > **Windows = native WSL docker only.** isannd targets the **native docker-ce inside your WSL Ubuntu** (`wsl -d <distro> -- /usr/bin/docker -H unix:///var/run/docker.sock …`), **never Docker Desktop** — not even as a fallback. `warmup` starts that daemon, and every docker op (`create` / `pull` / `ps`) goes to it. If Docker Desktop is installed, run `ivm check` for a conflict report; see **[Troubleshooting → Docker Desktop](../troubleshooting/docker-desktop.md)**. (`isann model pull` downloads model weights to disk via the fetcher — it does **not** use docker, so Docker Desktop never affects it.)
 
 | Command | Description | API | Nodes |
 |---|---|---|---|
 | `isann docker status` | WSL/docker readiness (side-effect free; native WSL docker). | `GET /docker/status` | ✅ |
-| `isann docker warmup` | Boot WSL **and start native dockerd inside it** (fire-and-forget). | `POST /docker/warmup` | ✅ |
+| `isann docker warmup` | Boot WSL **and start native dockerd inside it** (fire-and-forget; isannd retries the flaky cold start internally). | `POST /docker/warmup` | ✅ |
+| `isann docker wait [--engine name] [--timeout 300] [--interval 30]` | Block until ready (poll only — boots nothing). **No `--engine`** → wait for the docker **backend** (`docker status` running). **`--engine llama`** → wait for that **engine's HTTP readiness** (`docker probe` `http_ok`). Pair after `warmup`/`start` in recipes. Polls every `--interval` s up to `--timeout` s. | `GET /docker/status` or `…/probe/<name>` (poll) | — |
 | `isann docker shutdown [--force]` | `wsl --shutdown` (Windows only). | `POST /docker/shutdown [?force=1]` | ✅ |
 | `isann docker ps` | Container list. | `GET /docker/ps` | ✅ (`<id>@<ip:port>`) |
-| `isann docker create <engine>` | Compose-based spawn (streaming). | `POST /docker/create` | — |
-| `isann docker start\|stop\|restart <name> [--timeout s]` | wake / graceful stop (+SIGKILL) / stop+start. | `POST /docker/{start\|stop\|restart}/<name>` | ✅ |
-| `isann docker rm <name> [--force]` | Remove a container (running needs `--force`). | `DELETE /docker/rm/<name> [?force=1]` | — |
+| `isann docker prepare <engine>` | Assemble the engine's `.temp` model view — hardlink model/lora/vae from the store (`artifacts/addon/models/`) per its `.env` (`ARCH`/`MODEL`/`VAE_FILE`). **No container.** Idempotent (wipe+rebuild). Run before `create` when the `.env` mounts `./.temp/models`. | `POST /docker/prepare/<engine>` | — |
+| `isann docker create <engine> [-prepare]` | Compose-based spawn (streaming). `-prepare` assembles the `.temp` view first. | `POST /docker/create` | — |
+| `isann docker start\|stop\|restart <name> [--timeout s]` | wake / graceful stop (+SIGKILL) / stop+start. `start -prepare` re-assembles the `.temp` view before waking (local-only). | `POST /docker/{start\|stop\|restart}/<name>` | ✅ |
+| `isann docker stop --all \| --except <names>` | Bulk stop. `--all` = all running. `--except llama, sd` = stop all EXCEPT named. Useful for "engine X only" workflows in recipes — `stop --except llama; start llama;` results in llama-only state. Idempotent (already-stopped reported, not error). | `GET /docker/ps` + N × `POST /docker/stop/<name>` | — |
+| `isann docker rm <name> [-y] [--force]` | Remove a container (confirm prompt unless `-y`/`--force`; a **running** container needs `--force` → else 409). | `DELETE /docker/rm/<name> [?force=1]` | — |
 | `isann docker inspect <name>` | Raw `docker inspect` JSON. | `GET /docker/inspect/<name>` | — |
 | `isann docker probe <name>` | Engine HTTP readiness (does not wake WSL). | `GET /docker/status` + `…/probe/<name>` | — |
 | `isann docker pull <image>` | Image pull (streaming). | `POST /docker/pull` | — |
 
 ```console
-$ isann docker warmup           # boots WSL, then starts native dockerd inside it
-STEP     OK  DETAIL
-wsl      ok  Ubuntu-22.04 running
-dockerd  ok  started               # 'already running' on re-run (idempotent)
+$ isann docker warmup           # fire-and-forget: boots WSL + native dockerd in the background
+[isann] warmup started — run `isann docker status` to check progress
+
+$ isann docker wait             # block until the backend is actually running
+[isann] waiting for docker backend to be ready (timeout 300s, poll 30s)...
+[isann] docker backend ready (windows-wsl, engine 28.1.1)
 
 $ isann docker status
 COMPONENT  STATE    DETAIL
 wsl        running  Ubuntu-22.04
-docker     running  wsl, engine 27.1.1
+docker     running  wsl, engine 28.1.1
 
 $ isann docker create sd
 Pulling sd ... done
 [isann] sd: created and started (container: isann-sd)
 ```
+
+> **Cold start in scripts/recipes:** `warmup` returns immediately (the WSL+dockerd boot runs in the background and isannd retries the flaky cold dockerd start). Use `docker wait` next to block until the backend is genuinely up, then `docker start <engine>` is safe. See **[recipe](#recipe)**.
 
 ## favorite
 
@@ -235,8 +243,8 @@ Read-only views. models/loras/vaes/profiles support `--nodes`. nodes/metrics que
 |---|---|---|---|
 | `isann list nodes [--rv r] [--role x] [--owners a,b] [--model m] [--limit N] [--page N] [-no-cache]` | Nodes on an RV. The full list is fetched once and **ETag-cached** (revalidated every call — never stale, 304 when unchanged); `--role` / `--owners` / `--model` filter and `--page`/`--limit` paginate **client-side** (paging never re-fetches). | `GET /list/nodes?rv=<url>` | — |
 | `isann list metrics [--rv r]` | Per-(node,service) metrics from the RV (always fresh — volatile, no cache). | `GET /list/metrics?rv=<url>` | — |
-| `isann list models\|loras\|vaes [--engine e]` | Scan `engines/<e>/models/` (loras/vaes are KIND-filtered views). | `GET /list/models [?engine=<e>]` | ✅ |
-| `isann list profiles [--engine e]` | Scan `engines/<e>/profiles/*.env`. | `GET /list/profiles [?engine=<e>]` | ✅ |
+| `isann list models\|loras\|vaes [--engine e]` | Scan `artifacts/addon/models/<engine>/` (loras/vaes are KIND-filtered views). | `GET /list/models [?engine=<e>]` | ✅ |
+| `isann list profiles [--engine e]` | Scan `artifacts/addon/profiles/<engine>/*.env`. | `GET /list/profiles [?engine=<e>]` | ✅ |
 | `isann list favorites \| rvs \| accounts \| presets` | Delegate to favorite / rv / account / preset. | (delegated) | partial |
 
 `list nodes` filter matching: **`--role`** exact — `provider` \| `broker` only (consumers register for hole-punch and are **discovery-hidden**, so they never appear here; their counts live in `list rvs -remote`); **`--owners`** lowercase **prefix** (comma list, OR) — not exact; **`--model`** case-insensitive **substring** of a served model name — not exact. `-no-cache` forces a fresh fetch.
@@ -248,8 +256,123 @@ p:0xabc...  provider  1.2.3.4:7443  0xabc...  qwen2.5:14b  verified
 [isann] 1 node(s)
 
 $ isann list models --engine llama
-ENGINE  KIND   TYPE    REG  NAME                 SIZE
-llama   model  single   v   Qwen2.5-1.5B-Q4_K_M  1.0 GiB
+ENGINE  KIND   ARCH  TYPE    REG  PATH  NAME                 SIZE
+llama   model  -     single  ✓    -     Qwen2.5-1.5B-Q4_K_M  1.0 GiB
+```
+
+## tool
+
+The **canonical tool catalog** — what this node exposes to an agent harness or an MCP client. One source (core `isann` tools from `<root>/manifests/tools.json` + enabled addon bundles) feeds the agent, the MCP server's `tools/list`, and this command, so they never drift.
+
+| Command | Description | API | Nodes |
+|---|---|---|---|
+| `isann tool list` | List tools, **grouped by bundle** (enabled bundles only). The STATUS column shows backend reachability — `* connected`/`* executable` (injected to the model) vs `unreachable`/`locked` (listed only). | `GET /tool/list` | — |
+| `isann tool list --bundle isann,rag` | Filter by bundle — comma-list (N-value). | `GET /tool/list?bundle=…` | — |
+| `isann tool list --source isann\|addon` | Filter by trust class. | `GET /tool/list?source=…` | — |
+| `isann tool list --kind read\|control` | Filter by gate. | `GET /tool/list?kind=…` | — |
+| `isann tool show <name>` | One tool's detail (bundle · source · kind · input schema). | `GET /tool/show/{name}` | — |
+
+> **BUNDLE** = which provider package a tool came from — `isann` (isannd core, `manifests/tools.json`) or an addon's name (`rag`/`weather`… — joins when its container is running). **SOURCE** = `isann` \| `addon` (coarse trust class = the bundle's 2-bucket rollup). **KIND** = `read` \| `control` (a control tool needs an unlocked operator at call time). **STATUS** = backend reachability — only `connected`/`executable` tools are injected to the model; `unreachable`/`locked` stay listed so the operator sees them. These are catalog metadata for the CLI + the agent harness; an external MCP client (Claude) gets only `name`/`description`/`inputSchema`.
+>
+> **Bundle enable/disable moved to the [policy](#policy) namespace** (`isann policy add/rm/list --rule bundle`). An addon bundle is **opt-in** — disabled until `policy add --rule bundle <name>`, so it won't appear in `tool list` (or injection / calls) until enabled; `policy list --rule bundle` shows the full inventory (enabled + disabled) so you can see what to turn on. Core `isann` is **always-on** (can't be disabled). Claude (MCP) and the agent only ever see enabled bundles.
+
+**Tools exposed** — consolidated one-per-namespace (keeps the model's tool context small; operations are an `action`/`what` enum, not separate tools):
+
+| Tool | Kind | Args |
+|---|---|---|
+| `node_info` | read | — |
+| `list` | read | `what`: nodes \| models \| profiles \| containers \| mesh \| rvs |
+| `conn` | mixed* | `action`: ping \| keep \| drop \| list · `node` (id\|alias, for ping/keep/drop) — *cross-node* + warm-link pool; ping/keep/drop need unlock |
+| `infer` | read | `action`: schema \| run \| status \| result · `engine` · `input{}` · `job_id` |
+| `docker` | control | `action`: warmup \| status \| start \| stop \| restart \| rm · `name` (start/stop/restart/rm) · `force?` — **warmup** boots WSL+dockerd (fire-and-forget; then poll **status** for readiness), so an agent can bring up a cold node before `start` |
+| `mesh` | control | `action`: start \| stop \| on \| off · `component`: provider \| broker · `now?` |
+| `profile` | control | `action`: get \| use · `engine` · `name` |
+| `rv` | control | `action`: add \| rm \| use · `alias` · `url?` |
+| `cred` | mixed | `action`: list \| add \| use \| rm · `alias` · (`sig`/`issued`/`expire`/`bind?` for add) — protected-RV admission; add/use/rm operator |
+| `model` | mixed | `action`: info \| search \| rm · (`url`/`query`/`engine`+`kind`+`name`) · `force?` (rm) |
+
+`isann tool list` groups these under `[isann]` (KIND = `read`/`control` — the `mixed` tools render as `control`). **Control actions** require an **unlocked operator** — when the node is locked they return a *"locked — run `isann auth unlock`"* result so the assistant can prompt you (read actions like `infer`, `list`, `model search` are not gated). Gating is **per action**, so a tool's reads work while locked even if its writes don't. Tools act on **this node** — except `conn`, which probes another node via a signed cross-node round-trip; `--nodes`-style cross-node targeting for the other tools is a later addition. e.g. *"stop llama"* → `docker(action=stop, name=llama)`; *"generate an image"* → `infer(action=run, engine=sd, input={…})`.
+
+## agent
+
+The node's **agent harness** — an LLM that uses this node's tools to carry out a task, then answers. Inference runs on the engine you pick with `--engine`; the tool loop (inject the **[tool](#tool)** catalog → model requests a tool → isannd dispatches it in-process → feed the result back → repeat) runs **server-side inside isannd**. `--nodes` merges in another node's tools (cross-node, via the signed `/invoke/` tool plane); the loop stays on this node and remote tools execute on their owner node.
+
+| Command | Description | API | Nodes |
+|---|---|---|---|
+| `isann agent run "<task>" --engine e [--max-turns n] [--system p] [--preset n] [--temperature f] [--max-tokens n] [--nodes a,b] [-stream] [--trace <lanes>] [-json] [-pretty] [--proj p]` | Run one task: inject tools → call the engine → dispatch each tool the model requests → repeat until it answers (answer → stdout, trace → stderr). | `POST /internal/api/agent/run` | ✅ |
+| `isann agent chat --engine e [--max-turns n] [--system p] [--preset n] [--temperature f] [--max-tokens n] [--nodes a,b] [--trace <lanes>] [-pretty]` | Multi-turn REPL — context carries across messages; each message runs a full tool-using turn. Commands: `/trace <lanes>`, `/trace off`, `/reset`, `/exit` (Ctrl+D). | `POST /internal/api/agent/run` per message | ✅ |
+
+**Flags**
+
+- **`--engine <name|type>`** (required) — text engine/service: service name (`llm-api`) \| engine (`llama`) \| modality (`text`). Must be a text/LLM engine (function-calling capable).
+- **`--max-turns <n>`** — max LLM turns before stopping (default **8**).
+- **`--system <prompt>`** — override the default system prompt.
+- **`--preset <name>`** · **`--temperature <f>`** · **`--max-tokens <n>`** — generation params (same preset mechanism as `infer`; a preset's `agent` block can set `max_turns` etc.). Priority: engine default < preset < explicit flag.
+- **`--nodes <list>`** — comma-list of remote nodes whose tools to merge (cross-node). Each remote node's tools get a prefix (`<short-nodeid|alias>__<tool>`); the loop routes their calls back to the owner node over a signed round-trip.
+- **`-stream`** — stream the loop's step events as NDJSON live (tool calls/results → stderr, final answer → stdout; `-json` = raw NDJSON pass-through).
+- **`--trace <lanes>`** — print a trace to **stderr** (double-dash value flag, comma-list of lanes):
+  - `call` — the function call the model made (tool + args)
+  - `result` — the tool/invoke result
+  - `tokens` — per-turn `[turn N]` + multi-turn `[total]` token usage
+  - `raw` — the raw inference message JSON the engine returned each turn
+  - `all` — every lane (`--trace all`). e.g. `--trace call,tokens`. `-pretty` expands each value in full (else values over 2 KB are elided with a byte marker).
+- **`-json` / `-pretty` / `--proj`** — the full result JSON: `answer` + step `trace` + `meta` (engine, params, `usage`, `turn_usage`, `turn_raw`).
+
+```console
+$ isann agent run "stop the llama engine" --engine llama --trace call,result,tokens
+[1] docker {"action":"stop","name":"llama"}
+    → {"status":"stopped","name":"llama"}
+    [turn 1] prompt 1840 + completion 22 = 1862
+[total] prompt 4120 + completion 96 = 4216  ·  2 turns
+llama is stopped.
+
+$ isann agent chat --engine llama
+[isann] agent chat with llama — type a message.
+        commands: /trace [lanes|off]  ·  /reset  ·  /exit (Ctrl+D)
+> what GPUs does this node have?
+This node has an NVIDIA GeForce GTX 1650 (4 GB VRAM).
+> /trace call,result,tokens,raw     # turn the trace on mid-session
+[isann] trace on: call,result,tokens,raw
+> /trace off                         # stop tracing
+```
+
+**Control tools self-gate** — a control action (`docker`, `mesh`, `profile`, …) needs an **unlocked operator** at dispatch; on a locked node the model gets a *"locked"* result and reports it, rather than running. A destructive `rm` (`isann.docker.rm` / `isann.model.rm`) is **not** auto-run by the loop unless the operator allow-listed it — see **[policy](#policy)** (`--rule rm`). exec-handler addon tools need **[policy](#policy)** `--rule exec`.
+
+## policy
+
+Operator **security policy** (`<root>/artifacts/policy.json`) — three deny/disable-by-default allowlists, picked with **`--rule`**. `add` = allow/enable, `rm` = revoke/disable (uniform across all three). `add`/`rm` need an unlocked **operator** (owner/admin). `--nodes` not supported.
+
+| Rule | Controls | Value form |
+|---|---|---|
+| **`exec`** | exec-handler addon tools the agent / MCP may run (unsandboxed **host** code) — not injected until allowed | `<bundle>.<tool>` — e.g. `office.search` |
+| **`rm`** | destructive `rm` actions the autonomous agent loop may **auto-run** | `<bundle>.<tool>.<action>` — e.g. `isann.docker.rm` |
+| **`bundle`** | addon bundles that are **enabled** (addon is opt-in; core `isann` is always-on) | `<name>` — e.g. `rag` |
+
+| Command | Description | API | Nodes |
+|---|---|---|---|
+| `isann policy add --rule exec\|rm\|bundle <value>` | Allow / enable a rule (operator). Idempotent (`[skip] already allowed`). | `POST /internal/api/policy` | — |
+| `isann policy rm --rule exec\|rm\|bundle <value>` | Revoke / disable a rule (operator). Idempotent (`[skip] not in allowlist`). | `DELETE /internal/api/policy?rule=&value=` | — |
+| `isann policy list [--category tool\|agent] [--rule exec\|rm\|bundle]` | Show the policy. `exec`/`rm` = allowlists; `bundle` = **inventory** (every installed bundle + enabled/disabled state, so you can see what to turn on). | `GET /internal/api/policy` | — |
+
+> **`--category`** filters by subject: `tool` shows `exec` + `bundle`; `agent` shows `rm`. **`--rule`** narrows to one rule. With neither, all three sections print.
+
+```console
+$ isann policy add --rule bundle rag
+[ok] allowed (bundle): rag
+
+$ isann policy list --rule bundle
+[bundle]  (enabled bundles — addon is opt-in)
+  NAME     SOURCE  TOOLS  STATE
+  isann    isann   10     enabled (always-on)
+  rag      addon   2      enabled
+  weather  addon   1      disabled
+
+$ isann policy add --rule rm isann.docker.rm
+[ok] allowed (rm): isann.docker.rm
+
+$ isann policy list --rule rm
+[rm]  (destructive rm the agent may auto-run)
+  isann.docker.rm
 ```
 
 ## mcp
@@ -260,7 +383,6 @@ Expose this node to an **MCP client** (Claude Code, etc.) so it can drive the no
 
 | Command | Description | API | Nodes |
 |---|---|---|---|
-| `isann mcp tools` | List the tools the MCP server exposes. | `GET /mcp/tools` | — |
 | `isann mcp token [--label t]` | Issue a token (printed **once** — copy it now). | `POST /mcp/tokens` | — |
 | `isann mcp token list` | List issued tokens (id + label + created). | `GET /mcp/tokens` | — |
 | `isann mcp token revoke <id>` | Revoke a token by id. | `DELETE /mcp/tokens/{id}` | — |
@@ -277,22 +399,7 @@ $ claude mcp add --transport http isann \
     --header "Authorization: Bearer b1c2d3e4f5...9e0f"
 ```
 
-**Tools exposed** — consolidated one-per-namespace (keeps the model's tool context small; operations are an `action`/`what` enum, not separate tools):
-
-| Tool | Kind | Args |
-|---|---|---|
-| `node_info` | read | — |
-| `list` | read | `what`: nodes \| models \| profiles \| containers \| mesh \| rvs |
-| `conn` | mixed* | `action`: ping \| keep \| drop \| list · `node` (id\|alias, for ping/keep/drop) — *cross-node* + warm-link pool; ping/keep/drop need unlock |
-| `infer` | read | `action`: schema \| run \| status \| result · `engine` · `input{}` · `job_id` |
-| `docker` | control | `action`: start \| stop \| restart \| rm · `name` · `force?` |
-| `mesh` | control | `action`: start \| stop \| on \| off · `component`: provider \| broker · `now?` |
-| `profile` | control | `action`: get \| use · `engine` · `name` |
-| `rv` | control | `action`: add \| rm \| use · `alias` · `url?` |
-| `cred` | mixed | `action`: list \| add \| use \| rm · `alias` · (`sig`/`issued`/`expire`/`bind?` for add) — protected-RV admission; add/use/rm operator |
-| `model` | mixed | `action`: info \| search \| rm · (`url`/`query`/`engine`+`kind`+`name`) |
-
-`isann mcp tools` prints this list. **Control actions** require an **unlocked operator** — when the node is locked they return a *"locked — run `isann auth unlock`"* result so the assistant can prompt you (read actions like `infer`, `list`, `model search` are not gated). Gating is **per action**, so a tool's reads work while locked even if its writes don't. Tools act on **this node** — except `conn`, which probes another node via a signed cross-node round-trip; `--nodes`-style cross-node targeting for the other tools is a later addition. e.g. *"stop llama"* → `docker(action=stop, name=llama)`; *"generate an image"* → `infer(action=run, engine=sd, input={…})`.
+The tools a connected client can call are the node's **canonical catalog** — see **[`tool`](#tool)** above (`isann tool list`). The MCP server's `tools/list` adapts that same catalog into MCP's wire shape, so the two never drift.
 
 > Claude Code connects over HTTP directly. stdio-only clients bridge via `mcp-remote`. Endpoint is loopback-only (`127.0.0.1`) with an Origin guard.
 
@@ -333,34 +440,40 @@ Model management. pull/rm/list support `--nodes`; info/search/register do not.
 | `isann model list [--engine e] [--kind k]` | Local cached models/loras/vaes. | `GET /list/models [?engine=<e>]` | ✅ |
 | `isann model info <URL>` | Deep metadata: files (size+sha256), total size, kind, arch (HF + Civitai). | `GET /model/info?url=<URL>` | — |
 | `isann model search <q> \| --hash <sha> [--source s] [--kind k] [--limit N]` | Search Civitai / HF / local. | `GET /model/search?...` | — |
-| `isann model pull <URL> --engine e --kind k --name n [--arch a] [--force] [--nodes a,b]` | Download a model (NDJSON stream; multi-node parallel dashboard). | `POST /model/pull` | ✅ |
+| `isann model pull <URL> --engine e --kind k --name n [--arch a] [--force] [--nodes a,b]` | Download a model (NDJSON stream; multi-node parallel dashboard). Idempotent — **already-installed → skip** (`[skip]`, exit 0); `--force` re-downloads. | `POST /model/pull` | ✅ |
 | `isann model register --engine e --kind k --name n [--force]` | Hash an on-disk model + write `package.json` (no download). | `POST /model/register` | — |
 | `isann model rm --engine e --kind k --name n [--force]` | Delete an installed model directory. | `POST /model/rm` | ✅ |
 
 ```console
 $ isann model pull https://huggingface.co/Qwen/Qwen2.5-1.5B --engine llama --kind model --name Qwen2.5-1.5B
   model.safetensors  42.18%  (442368000 / 1048576000 bytes)
-[isann] done -- engines/llama/models/Qwen2.5-1.5B
+[isann] done -- artifacts/addon/models/llama/defaults/Qwen2.5-1.5B
   hash: sha256:abc123...   model_kind: single
 ```
 
 ## preset
 
-Pure local — reads/writes `.isann/presets/<type>.json`, no isannd. `--nodes` not supported.
+Pure local — reads/writes `artifacts/addon/presets/<type>.json`, no isannd. `--nodes` not supported.
 
 | Command | Description |
 |---|---|
-| `isann preset set --type t --name n key=value ...` | Create / merge a preset (value types auto-inferred). | 
+| `isann preset set --type t --name n key=value ...` | Create / merge a preset (value types auto-inferred). |
+| `isann preset pull <URL> --type t [--name n] [--hash h]` | Download a preset JSON from `https://` or `file://` and merge into the local `artifacts/addon/presets/<t>.json` (presets[] array). Accepts single-preset shape (`{name, values}`) or wrapped (`{service_type, presets[]}`). Name auto from JSON's `name` field or URL basename. **Existing preset with the same name is overwritten** (use distinct `--name` to keep versions). |
 | `isann preset list [--type t]` · `show --type t --name n` · `rm --type t --name n [-y]` | List / print / remove. |
 
 ```console
 $ isann preset set --type text --name creative temperature=1.1 top_p=0.95
 [isann] preset text/creative created (temperature=1.1, top_p=0.95)
+
+$ isann preset pull https://raw.githubusercontent.com/user/sd-presets/main/portrait.json --type sd
+[ok] preset pulled: sd/portrait (width=512, height=768, steps=20)
+     stored:  artifacts/addon/presets/sd.json (412 bytes)
+     sha256:  ab12...
 ```
 
 ## profile
 
-Engine `.env` profiles. All leaves support `--nodes`. `profile rm --force` cannot combine with `--nodes` (query-string not forwarded).
+Engine `.env` profiles. All leaves support `--nodes` except `pull` (local-only — disk write on the calling node). `profile rm --force` cannot combine with `--nodes` (query-string not forwarded).
 
 | Command | Description | API | Nodes |
 |---|---|---|---|
@@ -370,12 +483,179 @@ Engine `.env` profiles. All leaves support `--nodes`. `profile rm --force` canno
 | `isann profile create --engine e --name n [-y] [--force]` | New profile. | `POST /profile/create` | ✅ |
 | `isann profile update --engine e --name n` | Edit a profile (current values as defaults). | `PUT /profile/update` | ✅ |
 | `isann profile copy --engine e --from a --to b` | Clone a profile. | `POST /profile/copy` | ✅ |
+| `isann profile pull <URL> --engine e [--name n] [--hash h]` | Download a profile `.env` from `https://` or `file://` into `artifacts/addon/profiles/<e>/<n>.env`. Name auto from URL basename (`anime.env` → `anime`). `file://` uses hardlink-first (copy fallback for cross-volume). **Existing file is overwritten** (use distinct `--name` to keep versions). Doesn't activate — follow with `profile use`. | — (local disk) | ✗ |
 | `isann profile rm --engine e --name n [-y] [--force]` | Delete a profile (active needs `--force`). | `DELETE /profile/<e>/<n> [?force=1]` | ✅ (no force) |
 
 ```console
 $ isann profile use --engine llama --name highmem
 [isann] active profile -> llama/highmem
-        (run 'isann docker restart llama' to apply)
+        (run 'isann docker restart llama' to apply if the engine is running)
+
+$ isann profile pull https://raw.githubusercontent.com/user/sd-profiles/main/anime.env --engine sd
+[ok] profile downloaded: artifacts/addon/profiles/sd/anime.env (1234 bytes)
+     sha256: cd34...
+     activate: isann profile use --engine sd --name anime
+```
+
+## recipe
+
+Run a `.ian` script — a sequence of isann commands replayed in order, with optional **variable capture**, **conditional asserts**, **interactive prompts**, **`include`d sub-recipes**, and a **hardware precheck**. Each statement runs **in-process** (the runtime walks the same `rootCmd` tree the CLI does — no fork per statement); commands the in-process dispatcher does not own fall back to a subprocess fork transparently. Every `isann` mutation is idempotent by design, so a recipe re-runs safely. Runs entirely client-side; `--nodes` not supported (individual statements inside may carry `--nodes` themselves).
+
+| Command | Description | API | Nodes |
+|---|---|---|---|
+| `isann recipe exec <file.ian \| name> [-dry-run] [-keep-going] [-skip-check] [-fork]` | Parse + run a recipe. A bare name (no path separator) is taken from the store (`<root>/artifacts/addon/recipes/<name>`); anything with a path attached runs verbatim. `-dry-run` prints the plan only (requires still checked). `-keep-going` continues past a failed statement (reports failures at the end). `-skip-check` skips the `requires:` precheck. `-fork` forces subprocess fork per statement (diagnostic). | — (local; in-process or `isann` subprocess) | ✗ |
+| `isann recipe info <file.ian> [-json] [-pretty]` | Parse + print the doc-string (`# key: value` header), `requires:` block, and statement count / preview. | — (local parse only) | ✗ |
+| `isann recipe list [-json] [-pretty]` | List recipes under `<install-root>/artifacts/addon/recipes/` — `NAME / SOURCE / PULLED / SIZE` (SOURCE/PULLED from the sidecar `<name>.ian.json` when present). | — (local fs) | ✗ |
+| `isann recipe pull <URL> [--name n] [--sha256 h] [-json] [-pretty]` | Download a recipe from `https://` or `file://` into `artifacts/addon/recipes/<name>.ian` + emit a sidecar `<name>.ian.json` (`source_url` · `pulled_at` UTC · `sha256`). `--name` defaults to the URL basename. Always overwrites (versioning is the operator's job — pick distinct `--name`). | — (local fs) | ✗ |
+| `isann recipe rm <name> [-y] [-json]` | Delete `<name>.ian` and (if present) `<name>.ian.json`. Idempotent (already-absent → `skip`, exit 0). | — (local fs) | ✗ |
+
+> **Host-shell only.** `recipe exec / pull / rm / list / info` are blocked when invoked **from inside a recipe** statement — recipe-management belongs in the host shell, and a recipe that `recipe pull`s another recipe is a chain-attack vector. Compose with [`include`](#include) instead.
+
+### Recipe format
+
+```
+#pragma ISANN 0.1.20                     ← MANDATORY first line — minimum isann version
+# name: llama-jarvis                     ← optional doc-string (recipe info reads these)
+# author: 0xab12…cd34
+# description: One-shot llama bring-up + warm chat
+# version: 1.0.0
+# license: MIT
+
+requires:                                ← optional. blank line ends the block
+  vram: 8G+                              ←   node total VRAM ≥ N GB
+  gpu: RTX 30 | RTX 40 | GTX 16          ←   GPU name contains one alternation (substring)
+
+# Variables — capture command stdout JSON; reference with ${path}
+ver := version -json;
+echo "isann ${ver.isann} on ${ver.os}";
+
+# Interactive — read a line from stdin (echo suppressed with -secret)
+alias := func read "account alias: ";
+pass  := func read -secret "passphrase: ";
+auth unlock --account ${alias} --passphrase ${pass};
+
+# Inline constants + OS env
+var rv_alias = office;
+echo "home: ${env.HOME}";
+
+# Run-time assertion (separate from parse-time `requires:`)
+node := info -json;
+require ${node.gpu.available}, "GPU required";
+
+# Compose — splice another recipe in place (parse-time, same Memory)
+include "common-warmup.ian";
+
+# Plain statements — any isann command, ;-terminated
+docker stop --except llama;
+docker warmup;
+docker wait;                             # block until docker backend up
+docker start llama;
+docker wait --engine llama --timeout 180;
+echo "ready as ${alias}";
+```
+
+- **Statements** end with `;` (multi-line OK until `;`). `#` starts a comment.
+- The runner prints `[N/M] <cmd> ...` / `[N/M] ✓ <dur>` markers to **stderr** (the command's own stdout/stderr pass through untouched, so `recipe exec | jq` stays clean).
+- Stops at the first non-zero exit unless `-keep-going` (then collects failures and reports at the end).
+- **No per-statement timeout** — a slow step (model pull, WSL cold boot) just waits. `Ctrl+C` aborts.
+
+### `#pragma ISANN <version>` — version directive (mandatory)
+
+The **literal first line** of every recipe must be `#pragma ISANN <semver>` — no leading blanks or comments. The parser refuses anything else, and the runtime refuses a recipe whose declared minimum exceeds this CLI build (`upgrade isann` message). Inline comments after the version are allowed: `#pragma ISANN 0.1.20 # minimum`.
+
+```console
+$ isann recipe exec stale.ian
+isann: recipe exec: stale.ian:1: first line must be `#pragma ISANN <version>` …
+
+$ isann recipe exec needs-future.ian          # declares #pragma ISANN 99.0.0
+isann: recipe exec: requires isann >= 99.0.0 (current: 0.1.20) — upgrade isann or use an older recipe
+```
+
+### `requires:` — hardware precheck
+
+| Key | Value | Check |
+|---|---|---|
+| `vram` | `8G+` | Largest GPU VRAM ≥ N GB |
+| `gpu` | `RTX 30 \| RTX 40` | GPU name contains one of the alternations (case-insensitive substring) |
+
+Checked once before any statement runs. Shortfall → abort (override with `-skip-check`). Anything beyond `vram` / `gpu` is checked at run-time with `require` (see below) — full freedom via `capture := info -json`.
+
+### Variables — capture + `${path}` expansion
+
+```
+ver := version -json;                # subprocess stdout → JSON → Memory["ver"]
+echo "isann ${ver.isann}";           # → "isann 0.1.20"
+
+ps := docker ps -json;
+require ${ps.length} > 0, "no engines running";   # array length
+
+first := ${ps[0].name};              # array indexing + nested field
+```
+
+- `var := <cmd...>` runs the command, parses its stdout as **JSON**, and stores the value under `var`. **`-json` is not auto-added** — pass it explicitly when the command supports it (the [Common mechanics](#common-mechanics) shaping layer makes this universal).
+- `${var}` / `${var.field}` / `${arr[i]}` / `${arr.length}` walks the Memory map. Missing path or out-of-range index = **error stop** (silent null would hide schema drift).
+- Non-JSON stdout = error with a 200-byte preview. Stored values are plain Go `any` (string / number / bool / map / array).
+
+### `${env.X}` — OS environment
+
+`env` is a **reserved namespace** — `${env.HOME}` → `os.Getenv("HOME")`. Unset = empty string (Go convention). Flat strings only; `${env.X.y}` is an error (env values have no nested fields).
+
+### Built-ins
+
+The runtime implements seven built-ins in two classes. Six are **statements** — `echo`, `sleep`, `var`, `require`, `assert`, `include` — written bare, with no return value. One is a **function**: `read`, reached through the `func` namespace (`func read "prompt"`), whose result is optionally captured with `:=` (`name := func read "prompt"`), mirroring namespace capture (`v := docker ps -json`). `func` accepts only `read` — `func echo`, a bare `read`, etc. are rejected.
+
+| Built-in | Syntax | Effect |
+|---|---|---|
+| `echo` | `echo <args...>;` | Print args (post-`${}` expansion) to **stderr** so stdout pipes stay clean. |
+| `sleep` | `sleep <dur>;` | `time.ParseDuration` — `500ms`, `10s`, `2m`. Zero-arg = error (silent zero would mask a typo). |
+| `var` | `var <name> = <value...>;` | Assign a literal (post-expansion) string to Memory. Multi-token values join with spaces; native JSON path is capture (`name := cmd -json`). Formerly `set`. |
+| `read` | `func read [-secret] "prompt";` · `<name> := func read [-secret] "prompt";` | Read one line from stdin. The bare function form reads and discards (a pause/confirm); the capture form stores the line in Memory[name]. Prompt goes to stderr. `-secret` uses `golang.org/x/term.ReadPassword` (echo suppressed) when stdin is a TTY; falls back to a plain line read for piped input (so `recipe exec < answers.txt` still works in CI). A bare `read` (no `func`) or `read <var> "..."` is rejected. |
+| `require` | `require <expr>[, "<msg>"];` | Run-time assertion. `<expr>` = single truthy value **OR** `<a> ==\|!= <b>`. Falsy / inequal → abort with `msg` (or a default). Distinct from the parse-time `requires:` block — this can reference captured variables. |
+| `assert` | `assert <expr>[, "<msg>"];` | Alias of `require`. |
+| `include` | `include "<path>";` | **Parse-time** splice — the other file's statements appear in-place, sharing the same Memory. Recursive (with cycle detection), path is relative to the including file. The included file **must not** carry its own `requires:` block. |
+
+Truthy rule for single-value `require`: empty / `false` / `0` / `no` / `off` / `null` / `nil` (case-insensitive) → false; everything else → true.
+
+### Idempotent submit + auth
+
+- Put `auth unlock --account <a>;` as the first statement and export `ISANN_PASSPHRASE` — the unlock reads it and stashes a session token every following statement shares (via `.isann/session`, attached as `X-ISANN-Session`). For prompted unlock, use `pass := func read -secret "passphrase: "; auth unlock --account ${alias} --passphrase ${pass};`.
+- Every isann mutation is idempotent (create/add/pull → skip when present; rm → nothing-to-do when absent), so a recipe re-runs safely without `--force`.
+
+### Examples
+
+```console
+$ ISANN_PASSPHRASE=… isann recipe exec artifacts/addon/recipes/llama-start.ian
+[1/5] auth unlock --account me ... ✓ 5.9s
+[2/5] mesh start provider ... ✓ 0.4s
+[3/5] docker warmup ... ✓ 0.6s
+[4/5] docker wait ... [isann] docker backend ready (windows-wsl, engine 28.1.1) ✓ 35.0s
+[5/5] docker start llama ... ✓ 0.5s
+Recipe completed: 5/5 statements ok
+
+$ isann recipe pull https://raw.githubusercontent.com/iSANN-AI/recipes/main/llama-jarvis.ian
+[ok] recipe pulled: llama-jarvis
+     stored:  artifacts/addon/recipes/llama-jarvis.ian (1.4 KiB)
+     sidecar: artifacts/addon/recipes/llama-jarvis.ian.json
+     sha256:  ab12…
+
+$ isann recipe list
+NAME            SOURCE                                                          PULLED                SIZE
+llama-jarvis    https://raw.githubusercontent.com/iSANN-AI/recipes/main/...     2026-06-17T03:11:42Z  1.4 KiB
+local-bootstrap -                                                               -                     0.8 KiB
+
+$ isann recipe info artifacts/addon/recipes/llama-jarvis.ian
+name         llama-jarvis
+author       0xab12…cd34
+description  One-shot llama bring-up + warm chat
+requires     vram: 8G+   gpu: RTX 30 | RTX 40 | GTX 16
+statements   8  (first: auth unlock --account me;  last: echo "ready as ${alias}";)
+
+$ isann recipe exec -dry-run artifacts/addon/recipes/llama-jarvis.ian
+[plan]
+  [1/8] alias := func read "account alias: "
+  [2/8] pass := func read -secret "passphrase: "
+  [3/8] auth unlock --account ${alias} --passphrase ${pass}
+  …
 ```
 
 ## rv

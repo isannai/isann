@@ -106,7 +106,7 @@ With the node up (`isann docker status` → **docker running**), set up an engin
 6. **[Run inference](guide/6-inference.md)** — locally, or on another node with `--nodes`.
 7. **[Drive from Claude (MCP)](guide/7-mcp.md)** *(optional)* — connect Claude Code and run the node's tools (inference, engine start/stop, model/discovery) in natural language.
 
-> **Serving your own GPU?** The node answers inference through a **provider** (host-native, not a container). Start it with **`isann mesh on provider --now`** — it then autostarts with `isannd`. A client-only node skips this: `isann infer --nodes` reaches other nodes' providers directly. See **[`isann` reference → mesh](cli/cli-reference.md)**.
+> **Serving your own GPU?** The node answers inference through a **provider** (host-native, not a container). Start it with **`isann mesh start provider`** (use `isann mesh on provider --now` instead to also autostart it with `isannd`). A client-only node skips this: `isann infer --nodes` reaches other nodes' providers directly. See **[`isann` reference → mesh](cli/cli-reference.md)**.
 
 > **Drive it from Claude?** The node embeds an **MCP server** — issue a token (`isann mcp token`) and register the endpoint with Claude Code (`claude mcp add --transport http …`) to run the node's tools (engine start/stop, model list, inference) in natural language. See **[7 · Drive your node from Claude](guide/7-mcp.md)**.
 

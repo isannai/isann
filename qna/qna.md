@@ -11,7 +11,7 @@ Check in this order — **the firewall is usually *not* the first cause**:
 1. **Is the other node actually up, with its mesh running?**
    `isannd` has **no rendezvous (RV) connection of its own** — it borrows the control connection held by that node's **provider/broker** to look up peers. If the other node's mesh is down, peer lookup fails with **`peer not reachable` (404)** — that's *not* a firewall problem.
    - On the *target* node: `isann mesh status` → provider (and/or broker) should be **running**.
-   - Start it: `isann mesh on provider --now`
+   - Start it: `isann mesh start provider`
 
 2. **Is the target's `isannd` running and registered?**
    - `isann info` (node id), `isann docker status` (daemon alive).
@@ -29,7 +29,7 @@ The firewall rule that `ivm service install` adds is **program-scoped** (bound t
 
 | Changed since yesterday | Symptom | Fix |
 |:--|:--|:--|
-| Target's **mesh stopped** (logoff, reboot, manual stop) | `peer not reachable` 404 | `isann mesh on provider --now` on the target |
+| Target's **mesh stopped** (logoff, reboot, manual stop) | `peer not reachable` 404 | `isann mesh start provider` on the target |
 | Target's **LAN IP / public IP changed** (DHCP, router reboot) | dial **times out** to a stale address | restart the target's mesh so it re-registers |
 | Ran `isannd` **interactively** (not as a service) and the **network profile flipped** Public↔Private | inbound dropped today | install the **program + all-profiles** rule below (survives profile changes) |
 | **Antivirus / third-party firewall** updated | inbound dropped | allow `isannd.exe` inbound in *that* product (Windows rule won't cover it) |
